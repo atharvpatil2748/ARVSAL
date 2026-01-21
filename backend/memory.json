@@ -1,0 +1,85 @@
+{
+  "facts": {
+    "sejal": {
+      "relationship": {
+        "value": "friend",
+        "confidence": 1,
+        "source": "explicit",
+        "category": "identity",
+        "protected": true,
+        "createdAt": 1768934401179,
+        "updatedAt": 1768934401179,
+        "lastAccessedAt": 1768935948938,
+        "lastDecayAt": 1768934401179
+      },
+      "favourite colour": {
+        "value": "yellow",
+        "confidence": 0.9959949734375,
+        "source": "explicit",
+        "category": "general",
+        "protected": false,
+        "createdAt": 1768934415831,
+        "updatedAt": 1768934415831,
+        "lastAccessedAt": 1768934415831,
+        "lastDecayAt": 1769011312341
+      }
+    },
+    "user": {
+      "favourite colour": {
+        "value": "red",
+        "confidence": 0.9959966184375,
+        "source": "explicit",
+        "category": "general",
+        "protected": false,
+        "createdAt": 1768934447415,
+        "updatedAt": 1768934447415,
+        "lastAccessedAt": 1768934447415,
+        "lastDecayAt": 1769011312341
+      },
+      "name": {
+        "value": "Atharv",
+        "confidence": 0.99601078734375,
+        "source": "explicit",
+        "category": "general",
+        "protected": false,
+        "createdAt": 1768934719458,
+        "updatedAt": 1768934719458,
+        "lastAccessedAt": 1768968878269,
+        "lastDecayAt": 1769011312341
+      },
+      "college": {
+        "value": "IIT Kanpur",
+        "confidence": 0.5867342850694445,
+        "source": "reflected",
+        "category": "general",
+        "protected": false,
+        "createdAt": 1768934901823,
+        "updatedAt": 1768934901823,
+        "lastAccessedAt": 1768986434113,
+        "lastDecayAt": 1769011312341
+      },
+      "cpi": {
+        "value": "9.0",
+        "confidence": 0.5867342859375001,
+        "source": "reflected",
+        "category": "general",
+        "protected": false,
+        "createdAt": 1768934901828,
+        "updatedAt": 1768934901828,
+        "lastAccessedAt": 1768934901828,
+        "lastDecayAt": 1769011312341
+      },
+      "favourite sport": {
+        "value": "badminton",
+        "confidence": 0.9985976244270833,
+        "source": "explicit",
+        "category": "general",
+        "protected": false,
+        "createdAt": 1768984386730,
+        "updatedAt": 1768984386730,
+        "lastAccessedAt": 1768984440147,
+        "lastDecayAt": 1769011312341
+      }
+    }
+  }
+}

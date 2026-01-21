@@ -1,0 +1,86 @@
+[
+  {
+    "id": "1768994215565-l19kmc",
+    "role": "user",
+    "content": "lock",
+    "text": "lock",
+    "timestamp": 1768994215565
+  },
+  {
+    "id": "1768994215755-nbu9kp",
+    "role": "arvsal",
+    "content": "System locked.",
+    "text": "System locked.",
+    "timestamp": 1768994215755
+  },
+  {
+    "id": "1769003759470-5tcdw8",
+    "role": "user",
+    "content": "lock",
+    "text": "lock",
+    "timestamp": 1769003759470
+  },
+  {
+    "id": "1769003759694-oasz13",
+    "role": "arvsal",
+    "content": "Sir, System locked.",
+    "text": "Sir, System locked.",
+    "timestamp": 1769003759694
+  },
+  {
+    "id": "1769013976504-3gd8j7",
+    "role": "user",
+    "content": "heyy , what's up?",
+    "text": "heyy , what's up?",
+    "timestamp": 1769013976504
+  },
+  {
+    "id": "1769013993106-e8zx0y",
+    "role": "arvsal",
+    "content": "Not much, just waiting for further instructions.",
+    "text": "Not much, just waiting for further instructions.",
+    "timestamp": 1769013993106
+  },
+  {
+    "id": "1769014029314-b4nbvm",
+    "role": "user",
+    "content": "ohhh , how obedient you are!",
+    "text": "ohhh , how obedient you are!",
+    "timestamp": 1769014029314
+  },
+  {
+    "id": "1769014046888-nqndcl",
+    "role": "arvsal",
+    "content": "I prefer to think of myself as efficient rather than obedient.",
+    "text": "I prefer to think of myself as efficient rather than obedient.",
+    "timestamp": 1769014046888
+  },
+  {
+    "id": "1769014091086-6en3ci",
+    "role": "user",
+    "content": "okay okay ,don't mind",
+    "text": "okay okay ,don't mind",
+    "timestamp": 1769014091086
+  },
+  {
+    "id": "1769014109337-65g51i",
+    "role": "arvsal",
+    "content": "I'll keep that in mind. What's the task or topic you'd like to discuss?",
+    "text": "I'll keep that in mind. What's the task or topic you'd like to discuss?",
+    "timestamp": 1769014109337
+  },
+  {
+    "id": "1769014124178-rfynln",
+    "role": "user",
+    "content": "nothing much",
+    "text": "nothing much",
+    "timestamp": 1769014124178
+  },
+  {
+    "id": "1769014142562-udzkhv",
+    "role": "arvsal",
+    "content": "I sense a bit of apathy there. Would you like to explore something new, or is it just a moment of quiet contemplation?",
+    "text": "I sense a bit of apathy there. Would you like to explore something new, or is it just a moment of quiet contemplation?",
+    "timestamp": 1769014142562
+  }
+]
