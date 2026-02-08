@@ -1,34 +1,59 @@
-// ================= ENV =================
-require("dotenv").config();
+/**
+ * Arvsal Server
+ * Deterministic-first command pipeline
+ * LLM used ONLY where intended
+ * Memory-safe
+ * AI-mode persistent
+ */
 
-// ================= MEMORY =================
+const path = require("path");
+require("dotenv").config({
+  path: path.resolve(__dirname, "../.env")
+});
+
+/* ================= OLLAMA WARMUP ================= */
+
+const { warmAll } = require("./ollamaWarmup");
+warmAll(); // DO NOT await
+
+/* ================= MEMORY ================= */
+
 const chatHistory = require("./chatHistory");
 const episodicMemory = require("./episodicMemory");
 const memory = require("./memory");
 
-// ================= CORE =================
+/* ================= CORE ================= */
+
 const express = require("express");
 const cors = require("cors");
+const fs = require("fs");
+const os = require("os");
+const { spawn } = require("child_process");
+/* ================= CONFIRMATION ================= */
 
-// ================= CONFIRMATION =================
 const {
   setConfirmation,
   getConfirmation,
   clearConfirmation
 } = require("./confirmManager");
 
-// ================= BRAIN =================
+/* ================= BRAIN ================= */
+
 const normalize = require("./normalizer");
 const classifyIntent = require("./intentClassifier");
 const { resolveIntentWithLLM } = require("./llmIntentRouter");
 const { handleIntent } = require("./actions");
 const applyPersonality = require("./personality");
 const llmRouter = require("./llmRouter");
+const { getWeather, getNews } = require("./localSkills");
 
-// ================= MEMORY REFLECTION =================
-const { shouldReflect, reflect } = require("./reflect");
 
-// ================= SYSTEM ACTIONS =================
+/* ================= REFLECTION ================= */
+
+const { maybeRunReflection } = require("./reflectionRunner");
+
+/* ================= SYSTEM ACTIONS ================= */
+
 const {
   openApp,
   openFolder,
@@ -44,25 +69,182 @@ const {
   openYouTube
 } = require("./systemActions");
 
-// ================= APP =================
+const NON_LLM_INTENTS = new Set([
+  "LOCAL_SKILL",
+  "OPEN_APP",
+  "OPEN_FOLDER",
+  "OPEN_CALENDAR",
+  "SHUTDOWN",
+  "RESTART",
+  "LOCK",
+  "SLEEP",
+  "MUTE",
+  "VOLUME_UP",
+  "VOLUME_DOWN",
+  "SEARCH",
+  "YOUTUBE"
+]);
+/* ================= AI SWITCH ================= */
+
+const {
+  connectChatGPT,
+  connectGemini,
+  disconnectAI,
+  getActiveAI
+} = require("./aiSwitch");
+
+/* ================= APP ================= */
+
 const app = express();
 app.use(cors());
-app.use(express.json());
 
-// ================= HELPERS =================
+// 🔥 raw audio MUST come before json
+app.use("/audio", express.raw({
+  type: ["audio/webm", "audio/wav", "application/octet-stream"],
+  limit: "50mb"
+}));
+
+app.use(express.json());
+app.get("/health", (_req, res) => {
+  res.json({ status: "ok" });
+});
+
+/* ================= HELPERS ================= */
+
 function stripWakeWord(text = "") {
   return text
     .replace(/^hey\s+(arvsal|arsal|arsel|arsenal|harshal)\s*/i, "")
     .trim();
 }
 
-// ================= CONFIDENCE DECAY =================
+/* ================= MEMORY CONFIDENCE DECAY ================= */
+
 try { memory.decayConfidence(); } catch {}
 setInterval(() => {
   try { memory.decayConfidence(); } catch {}
 }, 6 * 60 * 60 * 1000);
 
-// ================= COMMAND =================
+/* ================= AUDIO (WHISPER) ================= */
+
+app.post("/audio",async (req, res) => {
+    try {
+      if (!req.body || !req.body.length) {
+        return res.json({ error: "Empty audio buffer" });
+      }
+
+      const base = `arvsal_${Date.now()}`;
+      const webmPath = path.join(os.tmpdir(), `${base}.webm`);
+      const wavPath  = path.join(os.tmpdir(), `${base}.wav`);
+
+      // 1️⃣ write WEBM exactly as received
+      fs.writeFileSync(webmPath, req.body);
+
+      // 2️⃣ convert WEBM → WAV (16kHz mono)
+      const ffmpegExe =
+        "C:\\Users\\athar\\Downloads\\ffmpeg-8.0.1-essentials_build\\ffmpeg-8.0.1-essentials_build\\bin\\ffmpeg.exe";
+
+      await new Promise((resolve, reject) => {
+        const ff = spawn(ffmpegExe, [
+          "-y",
+          "-i", webmPath,
+          "-ar", "16000",
+          "-ac", "1",
+          wavPath
+        ]);
+
+        ff.on("close", code => {
+          code === 0 ? resolve() : reject(new Error("ffmpeg failed"));
+        });
+      });
+
+      // 3️⃣ run whisper on REAL wav
+      const whisperExe = path.resolve(
+        __dirname,
+        "../whisper.cpp/build/bin/whisper-cli.exe"
+      );
+
+      const modelPath = path.resolve(
+        __dirname,
+        "../whisper.cpp/models/ggml-small.en.bin"
+      );
+
+      let output = "";
+
+      const whisper = spawn(whisperExe, [
+        "-m", modelPath,
+        "-f", wavPath
+      ]);
+
+      whisper.stdout.on("data", d => {
+        output += d.toString();
+      });
+      whisper.stderr.on("data", () => {});
+
+      whisper.on("close", () => {
+        fs.unlinkSync(webmPath);
+        fs.unlinkSync(wavPath);
+
+        const text = output
+          .split("\n")
+          .filter(l => l.includes("]"))
+          .map(l => l.replace(/^.*\]\s*/, ""))
+          .join(" ")
+          .trim();
+
+        res.json({ text });
+      });
+
+    } catch (err) {
+      console.error("AUDIO ERROR:", err);
+      res.json({
+        error: "Audio processing failed",
+        details: err.message
+      });
+    }
+  }
+);
+
+/* ================= TTS (PIPER) ================= */
+
+app.post("/speak", async (req, res) => {
+  try {
+    const text = req.body?.text;
+    if (!text || typeof text !== "string") {
+      return res.status(400).json({ error: "No text provided" });
+    }
+
+    const base = `arvsal_tts_${Date.now()}`;
+    const wavPath = path.join(os.tmpdir(), `${base}.wav`);
+
+    const piperExe =
+      "C:\\Users\\athar\\Downloads\\piper_windows_amd64\\piper\\piper.exe";
+
+    const modelPath =
+      "C:\\Users\\athar\\Downloads\\piper_windows_amd64\\piper\\en_US-ryan-high.onnx";
+
+    const piper = spawn(piperExe, [
+      "-m", modelPath,
+      "-f", wavPath
+    ]);
+
+    piper.stdin.write(text);
+    piper.stdin.end();
+
+    piper.on("close", () => {
+      const audio = fs.readFileSync(wavPath);
+      fs.unlinkSync(wavPath);
+
+      res.set("Content-Type", "audio/wav");
+      res.send(audio);
+    });
+
+  } catch (err) {
+    console.error("PIPER ERROR:", err);
+    res.status(500).json({ error: "TTS failed" });
+  }
+});
+/* ================= COMMAND ENDPOINT ================= */
+
 app.post("/command", async (req, res) => {
   const rawInput =
     req.body.command ??
@@ -74,100 +256,169 @@ app.post("/command", async (req, res) => {
     return res.json({ reply: "" });
   }
 
-  const normalized = normalize(rawInput);
-  const cleanRawText = stripWakeWord(normalized.rawText);
-  const cleanNormalizedText = stripWakeWord(normalized.normalizedText);
+  /* ---------- NORMALIZATION ---------- */
+
+const normalized = normalize(rawInput);
+
+// 🔒 FORCE spoken + typed to behave identically
+const cleanRawText = stripWakeWord(normalized.rawText);
+const cleanNormalizedText = stripWakeWord(
+  normalized.normalizedText
+    .toLowerCase()
+    .replace(/[^\w\s]/g, "")   // 🔥 remove punctuation
+    .trim()
+);
+  let intentObj = null; // ✅ declare first (VERY IMPORTANT)
+
+  /* ---------- CHAT HISTORY (USER) ---------- */
 
   chatHistory.addMessage("user", cleanRawText);
 
-  // ---------- INTENT (RULES FIRST) ----------
-  let intentObj = classifyIntent({
-    rawText: cleanRawText,
-    normalizedText: cleanNormalizedText
+  const emotional =
+    /\b(wasted|tired|sad|happy|free|love|hate|stress|enjoy)\b/i.test(cleanRawText);
+
+  await episodicMemory.store({
+    type: "conversation",
+    subject: "user",
+    value: cleanRawText,
+    source: "user",
+    importance: emotional ? 0.75 : 0.65
   });
+  /* ---------- INTENT (RULES FIRST) ---------- */
 
-  // ---------- LLM INTENT FALLBACK ----------
-  if (
-    intentObj.intent === "GENERAL_QUESTION" &&
-    cleanRawText.length > 3 &&
-    !getConfirmation()
-  ) {
-    const llmIntent = await resolveIntentWithLLM(cleanRawText);
-    if (llmIntent?.intent) intentObj = llmIntent;
+  if (!intentObj) {
+    intentObj = classifyIntent({
+      rawText: cleanRawText,
+      normalizedText: cleanNormalizedText
+    });
   }
+  /* ---------- CONFIRMATION (ABSOLUTE PRIORITY) ---------- */
 
-  // ---------- CONFIRMATION ----------
   const pending = getConfirmation();
   if (pending) {
     if (intentObj.intent === "CONFIRM_YES") {
       clearConfirmation();
       pending.execute?.();
-      const reply = await applyPersonality("Okay, confirmed.");
+      const reply = "Okay, confirmed.";
       chatHistory.addMessage("arvsal", reply);
       return res.json({ reply });
     }
 
     if (intentObj.intent === "CONFIRM_NO") {
       clearConfirmation();
-      const reply = await applyPersonality("Okay, cancelled.");
+      const reply = "Okay, cancelled.";
       chatHistory.addMessage("arvsal", reply);
       return res.json({ reply });
     }
 
-    const reply = await applyPersonality("Please say yes or no.");
+    const reply = "Please say yes or no.";
     chatHistory.addMessage("arvsal", reply);
     return res.json({ reply });
   }
 
-  // ---------- MAIN FLOW ----------
+  /* ---------- DETERMINISTIC INTENTS (NO LLM EVER) ---------- */
+
+  if ([
+    "INTRODUCE_SELF",
+    "REMEMBER",
+    "RECALL",
+    "FORGET",
+    "MEMORY_SUMMARY",
+    "DAY_RECALL",
+    "EPISODIC_RECALL",
+    "EPISODIC_BY_DATE",
+    "META_MEMORY"
+  ].includes(intentObj.intent)) {
+    const reply = await handleIntent(intentObj);
+    chatHistory.addMessage("arvsal", reply);
+    return res.json({ reply });
+  }
+
+  /* ---------- SAFE LLM INTENT FALLBACK ---------- */
+
+  // if (
+  //   intentObj.intent === "GENERAL_QUESTION" &&
+  //   cleanRawText.length > 5 &&
+  //   !/^(hi|hello|hey)$/i.test(cleanRawText) &&
+  //   !intentObj.skill // ⛔ prevent LOCAL_SKILL override
+  // ) {
+  //   const llmIntent = await resolveIntentWithLLM(cleanRawText);
+  //   if (llmIntent?.intent) intentObj = llmIntent;
+  // }
+
+  /* ---------- MAIN EXECUTION ---------- */
+
   let reply = "";
   let skipEpisodic = false;
+  let skipPersonality = false;
 
   try {
     switch (intentObj.intent) {
 
-      // ===== DETERMINISTIC =====
-      case "INTRODUCE_SELF":
-      case "REMEMBER":
-      case "RECALL":
-      case "FORGET":
-      case "MEMORY_SUMMARY":
-      case "DAY_RECALL":
-      case "EPISODIC_BY_DATE":
-      case "EPISODIC_RECALL":
-      case "SMALLTALK":
-      case "LOCAL_SKILL":
-        reply = await handleIntent(intentObj);
+      /* ===== AI MODE ===== */
+
+      case "CONNECT_CHATGPT":
+        connectChatGPT();
+        reply = "Switched to ChatGPT.";
+        skipEpisodic = true;
+        skipPersonality = true;
         break;
 
-      // ===== APPS =====
-      case "OPEN_APP":
-        if (!intentObj.app) {
-          reply = "Which app do you want me to open?";
-          break;
-        }
-        openApp(intentObj.app);
-        reply = `Opening ${intentObj.app}`;
+      case "CONNECT_GEMINI":
+        connectGemini();
+        reply = "Switched to Gemini.";
         skipEpisodic = true;
+        skipPersonality = true;
+        break;
+
+      case "DISCONNECT_AI":
+        disconnectAI();
+        reply = "Disconnected from external AI.";
+        skipEpisodic = true;
+        skipPersonality = true;
+        break;
+
+      /* ===== LOCAL SKILLS ===== */
+
+      case "LOCAL_SKILL":
+        skipPersonality = true;
+
+        if (intentObj.skill === "WEATHER") {
+          reply = await getWeather(intentObj.city);
+        } else if (intentObj.skill === "NEWS") {
+          reply = await getNews();
+        } else {
+          reply = await handleIntent(intentObj);
+        }
+
+        // ⚠️ IMPORTANT:
+        // Allow episodic memory for meaningful local info
+        skipEpisodic = false;
+        break;
+
+      /* ===== SYSTEM / APPS ===== */
+
+      case "OPEN_APP":
+        openApp(intentObj.app);
+        reply = `Opening ${intentObj.app}.`;
+        skipEpisodic = true;
+        skipPersonality = true;
         break;
 
       case "OPEN_FOLDER":
-        if (!intentObj.path) {
-          reply = "Which folder should I open?";
-          break;
-        }
         openFolder(intentObj.path);
-        reply = "Opening folder";
+        reply = "Opening folder.";
         skipEpisodic = true;
+        skipPersonality = true;
         break;
 
       case "OPEN_CALENDAR":
         openCalendar();
-        reply = "Opening calendar";
+        reply = "Opening calendar.";
         skipEpisodic = true;
+        skipPersonality = true;
         break;
 
-      // ===== SYSTEM =====
       case "SHUTDOWN":
         setConfirmation({ execute: shutdown });
         reply = "Are you sure you want to shut down?";
@@ -188,397 +439,136 @@ app.post("/command", async (req, res) => {
 
       case "LOCK":
         lock();
-        reply = "System locked";
+        reply = "System locked.";
         skipEpisodic = true;
+        skipPersonality = true;
         break;
 
-      // ===== MEDIA =====
       case "VOLUME_UP":
-        volumeUp(); reply = "Volume increased"; skipEpisodic = true; break;
-      case "VOLUME_DOWN":
-        volumeDown(); reply = "Volume decreased"; skipEpisodic = true; break;
-      case "MUTE":
-        mute(); reply = "Volume muted"; skipEpisodic = true; break;
-
-      // ===== WEB =====
-      case "SEARCH":
-        if (!intentObj.query) {
-          reply = "What should I search for?";
-          break;
-        }
-        searchGoogle(intentObj.query);
-        reply = `Searching for ${intentObj.query}`;
+        volumeUp();
+        reply = "Volume increased.";
         skipEpisodic = true;
+        skipPersonality = true;
+        break;
+
+      case "VOLUME_DOWN":
+        volumeDown();
+        reply = "Volume decreased.";
+        skipEpisodic = true;
+        skipPersonality = true;
+        break;
+
+      case "MUTE":
+        mute();
+        reply = "Volume muted.";
+        skipEpisodic = true;
+        skipPersonality = true;
+        break;
+
+      case "SEARCH":
+        searchGoogle(intentObj.query);
+        reply = `Searching for ${intentObj.query}.`;
+        skipEpisodic = true;
+        skipPersonality = true;
         break;
 
       case "YOUTUBE":
-        if (!intentObj.query) {
-          reply = "What should I search on YouTube?";
-          break;
-        }
-        openYouTube(intentObj.query);
-        reply = `Searching YouTube for ${intentObj.query}`;
+        openYouTube(intentObj.query || "");
+        reply = "Opening YouTube.";
         skipEpisodic = true;
+        skipPersonality = true;
         break;
 
-      // ===== GENERATIVE =====
-      default:
+      /* ===== GENERATIVE (LAST) ===== */
+      case "CONFIRM_YES":
+      case "CONFIRM_NO": {
+        const pending = getConfirmation();
+
+        if (!pending) {
+          reply = intentObj.intent === "CONFIRM_NO"
+            ? "Alright."
+            : "Okay.";
+          break;
+        }
+
+        if (intentObj.intent === "CONFIRM_NO") {
+          clearConfirmation();
+          reply = "Okay, cancelled.";
+          break;
+        }
+
+        if (intentObj.intent === "CONFIRM_YES") {
+          clearConfirmation();
+          reply = await handleIntent(pending);
+          break;
+        }
+      }
+
+      case "SMALLTALK":
+      case "GENERAL_QUESTION":
+      case "CODING_QUERY":
+      case "MATH_QUERY":
+
+        // 🔒 HARD BLOCK — LLM must NEVER answer local/system intents
+        if (NON_LLM_INTENTS.has(intentObj.intent)) {
+          reply = "I'm not certain about that.";
+          break;
+        }
+
         reply = await llmRouter({
           intent: intentObj.intent,
           text: cleanRawText
         });
-        if (!reply) reply = "I'm not certain about that.";
+
+        if (!reply) {
+          reply = getActiveAI() !== "local"
+            ? `${getActiveAI().toUpperCase()} is temporarily unavailable.`
+            : "I'm not certain about that.";
+        }
+        break;
+
+      default:
+        reply = "I'm not certain about that.";
     }
 
   } catch (err) {
-    console.error(err);
+    console.error("COMMAND ERROR:", err);
     reply = "Something went wrong.";
   }
 
-  reply = await applyPersonality(reply);
-  chatHistory.addMessage("arvsal", reply);
+  /* ---------- PERSONALITY ---------- */
 
+  if (!skipPersonality) {
+    reply = await applyPersonality(reply);
+  }
+
+  /* ---------- CHAT HISTORY ---------- */
+
+  chatHistory.addMessage("arvsal", reply);
+  if (["CONFIRM_YES", "CONFIRM_NO"].includes(intentObj.intent)) {
+    skipEpisodic = true;
+  }
   if (!skipEpisodic) {
-    episodicMemory.store({
+    await episodicMemory.store({
       type: "response",
       subject: "arvsal",
       value: reply,
-      source: "system"
+      source: "system",
+      importance: 0.4
     });
   }
 
-  try { if (shouldReflect()) reflect(); } catch {}
+  /* ---------- REFLECTION ---------- */
+
+  try { maybeRunReflection("user"); } catch {}
 
   res.json({ reply });
 });
 
-// ================= START =================
+/* ================= START ================= */
+
 app.listen(3000, () => {
   console.log("Arvsal backend running on http://localhost:3000");
 });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// // ================= ENV =================
-// require("dotenv").config();
-
-// // ================= MEMORY =================
-// const chatHistory = require("./chatHistory");
-// const episodicMemory = require("./episodicMemory");
-// const memory = require("./memory");
-
-// // ================= CORE =================
-// const express = require("express");
-// const cors = require("cors");
-
-// // ================= CONFIRMATION =================
-// const {
-//   setConfirmation,
-//   getConfirmation,
-//   clearConfirmation
-// } = require("./confirmManager");
-
-// // ================= BRAIN =================
-// const normalize = require("./normalizer");
-// const classifyIntent = require("./intentClassifier");
-// const { resolveIntentWithLLM } = require("./llmIntentRouter");
-// const { handleIntent } = require("./actions");
-// const applyPersonality = require("./personality");
-// const llmRouter = require("./llmRouter");
-
-// // ================= MEMORY REFLECTION =================
-// const { shouldReflect, reflect } = require("./reflect");
-
-// // ================= SYSTEM ACTIONS =================
-// const {
-//   openApp,
-//   openFolder,
-//   openCalendar,
-//   shutdown,
-//   restart,
-//   sleep,
-//   lock,
-//   volumeUp,
-//   volumeDown,
-//   mute,
-//   playPause,
-//   nextTrack,
-//   prevTrack,
-//   searchGoogle,
-//   openYouTube
-// } = require("./systemActions");
-
-// // ================= APP =================
-// const app = express();
-// app.use(cors());
-// app.use(express.json());
-
-// // ================= HELPERS =================
-// function stripWakeWord(text = "") {
-//   return text
-//     .replace(/^hey\s+(arvsal|arsal|arsel|arsenal|harshal)\s*/i, "")
-//     .trim();
-// }
-
-// // ================= 🧠 CONFIDENCE DECAY =================
-// try {
-//   memory.decayConfidence();
-// } catch {}
-
-// setInterval(() => {
-//   try {
-//     memory.decayConfidence();
-//   } catch {}
-// }, 6 * 60 * 60 * 1000);
-
-// // ================= COMMAND =================
-// app.post("/command", async (req, res) => {
-//   const rawInput =
-//     req.body.command ??
-//     req.body.text ??
-//     req.body.message ??
-//     "";
-
-//   if (!rawInput || typeof rawInput !== "string") {
-//     return res.json({ reply: "" });
-//   }
-
-//   // 🔑 NORMALIZATION
-//   const normalized = normalize(rawInput);
-//   const cleanRawText = stripWakeWord(normalized.rawText);
-//   const cleanNormalizedText = stripWakeWord(normalized.normalizedText);
-
-//   // 🧠 CHAT HISTORY (USER)
-//   chatHistory.addMessage("user", cleanRawText);
-
-//   // ================= INTENT (DETERMINISTIC FIRST) =================
-//   let intentObj = classifyIntent({
-//     rawText: cleanRawText,
-//     normalizedText: cleanNormalizedText
-//   });
-
-//   // ================= 🤖 LLM INTENT FALLBACK =================
-//   if (
-//     intentObj.intent === "GENERAL_QUESTION" &&
-//     cleanRawText.length > 3
-//   ) {
-//     const llmIntent = await resolveIntentWithLLM(cleanRawText);
-//     if (llmIntent?.intent) {
-//       intentObj = llmIntent;
-//     }
-//   }
-
-//   // ================= EPISODIC USER MEMORY =================
-//   const NON_EPISODIC_INTENTS = new Set([
-//     "REMEMBER",
-//     "FORGET",
-//     "RECALL",
-//     "MEMORY_SUMMARY",
-//     "DAY_RECALL",
-//     "EPISODIC_BY_DATE",
-//     "CONFIRM_YES",
-//     "CONFIRM_NO",
-//     "LOCAL_SKILL"
-//   ]);
-
-//   const isContextFollowup =
-//     intentObj.intent === "RECALL" && intentObj.key === "it";
-
-//   if (
-//     !NON_EPISODIC_INTENTS.has(intentObj.intent) &&
-//     !isContextFollowup &&
-//     cleanRawText.length > 10
-//   ) {
-//     episodicMemory.store({
-//       type: "conversation",
-//       subject: "user",
-//       value: cleanRawText,
-//       source: "user"
-//     });
-//   }
-
-//   // ================= CONFIRMATION FLOW =================
-//   const pending = getConfirmation();
-
-//   if (pending) {
-//     if (intentObj.intent === "CONFIRM_YES") {
-//       clearConfirmation();
-//       pending.execute?.();
-//       const reply = await applyPersonality("Okay, confirmed.");
-//       chatHistory.addMessage("arvsal", reply);
-//       return res.json({ reply });
-//     }
-
-//     if (intentObj.intent === "CONFIRM_NO") {
-//       clearConfirmation();
-//       const reply = await applyPersonality("Okay, cancelled.");
-//       chatHistory.addMessage("arvsal", reply);
-//       return res.json({ reply });
-//     }
-
-//     const reply = await applyPersonality("Please say yes or no.");
-//     chatHistory.addMessage("arvsal", reply);
-//     return res.json({ reply });
-//   }
-
-//   // ================= MAIN FLOW =================
-//   let reply = "";
-//   let skipEpisodicResponse = false;
-
-//   try {
-//     switch (intentObj.intent) {
-
-//       // 🧠 CORE
-//       case "INTRODUCE_SELF":
-//       case "REMEMBER":
-//       case "RECALL":
-//       case "FORGET":
-//       case "MEMORY_SUMMARY":
-//       case "DAY_RECALL":
-//       case "EPISODIC_BY_DATE":
-//       case "EPISODIC_RECALL":
-//       case "SMALLTALK":
-//       case "LOCAL_SKILL":
-//         reply = await handleIntent(intentObj);
-//         break;
-
-//       // -------- APPS --------
-//       case "OPEN_APP":
-//         openApp(intentObj.app);
-//         reply = `Opening ${intentObj.app}`;
-//         skipEpisodicResponse = true;
-//         break;
-
-//       case "OPEN_FOLDER":
-//         openFolder(intentObj.path);
-//         reply = "Opening folder";
-//         skipEpisodicResponse = true;
-//         break;
-
-//       case "OPEN_CALENDAR":
-//         openCalendar();
-//         reply = "Opening calendar";
-//         skipEpisodicResponse = true;
-//         break;
-
-//       // -------- SYSTEM --------
-//       case "SHUTDOWN":
-//         setConfirmation({ execute: shutdown });
-//         reply = "Are you sure you want to shut down?";
-//         skipEpisodicResponse = true;
-//         break;
-
-//       case "RESTART":
-//         setConfirmation({ execute: restart });
-//         reply = "Are you sure you want to restart?";
-//         skipEpisodicResponse = true;
-//         break;
-
-//       case "SLEEP":
-//         setConfirmation({ execute: sleep });
-//         reply = "Do you want to put the system to sleep?";
-//         skipEpisodicResponse = true;
-//         break;
-
-//       case "LOCK":
-//         lock();
-//         reply = "System locked";
-//         skipEpisodicResponse = true;
-//         break;
-
-//       // -------- MEDIA --------
-//       case "VOLUME_UP":
-//         volumeUp();
-//         reply = "Volume increased";
-//         skipEpisodicResponse = true;
-//         break;
-
-//       case "VOLUME_DOWN":
-//         volumeDown();
-//         reply = "Volume decreased";
-//         skipEpisodicResponse = true;
-//         break;
-
-//       case "MUTE":
-//         mute();
-//         reply = "Volume muted";
-//         skipEpisodicResponse = true;
-//         break;
-
-//       // -------- WEB --------
-//       case "SEARCH":
-//         searchGoogle(intentObj.query);
-//         reply = `Searching for ${intentObj.query}`;
-//         skipEpisodicResponse = true;
-//         break;
-
-//       case "YOUTUBE":
-//         openYouTube(intentObj.query);
-//         reply = `Searching YouTube for ${intentObj.query}`;
-//         skipEpisodicResponse = true;
-//         break;
-
-//       // 🤖 FINAL RESPONSE LLM ONLY
-//       default:
-//         reply = await llmRouter({
-//           intent: intentObj.intent,
-//           text: cleanRawText
-//         });
-//     }
-//   } catch (err) {
-//     console.error("ERROR:", err);
-//     reply = "Something went wrong.";
-//   }
-
-//   reply = await applyPersonality(reply);
-
-//   // 🧠 CHAT HISTORY (ARVSAL)
-//   chatHistory.addMessage("arvsal", reply);
-
-//   // 🧠 EPISODIC RESPONSE
-//   if (!skipEpisodicResponse) {
-//     episodicMemory.store({
-//       type: "response",
-//       subject: "arvsal",
-//       value: reply,
-//       source: "system"
-//     });
-//   }
-
-//   // 🧠 REFLECTION
-//   try {
-//     if (shouldReflect()) reflect();
-//   } catch {}
-
-//   res.json({ reply });
-// });
-
-// // ================= HISTORY =================
-// app.get("/history", (req, res) => {
-//   res.json(chatHistory.getHistory());
-// });
-
-// // ================= START =================
-// app.listen(3000, () => {
-//   console.log("Arvsal backend running on http://localhost:3000");
-// });
-
-
-
-
 
 

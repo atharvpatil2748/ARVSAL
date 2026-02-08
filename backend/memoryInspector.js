@@ -7,7 +7,6 @@
 const memory = require("./memory");
 const episodicMemory = require("./episodicMemory");
 
-
 /* ================= UTIL ================= */
 
 function formatDateTime(ts) {
@@ -16,6 +15,9 @@ function formatDateTime(ts) {
   return `${d.toDateString()} ${d.toLocaleTimeString()}`;
 }
 
+function normalizeSubject(subject) {
+  return String(subject || "user").toLowerCase().trim();
+}
 
 /* ================= SUBJECT MEMORY ================= */
 
@@ -24,6 +26,8 @@ function formatDateTime(ts) {
  * Human-accurate: uses createdAt (when told), not updatedAt
  */
 function getSubjectMemory(subject = "user") {
+  subject = normalizeSubject(subject);
+
   const facts = memory.summarize(subject);
 
   return facts.map(f => ({
@@ -31,13 +35,12 @@ function getSubjectMemory(subject = "user") {
     key: f.key,
     value: f.value,
     confidence: Number(f.confidence.toFixed(2)),
-    source: f.source,               // explicit | inferred
+    source: f.source,                // explicit | inferred
     category: f.category,
     rememberedOn: formatDateTime(f.createdAt),
-    lastRecalledOn: formatDateTime(f.updatedAt)
+    lastRecalledOn: formatDateTime(f.lastAccessedAt) // ✅ FIXED
   }));
 }
-
 
 /* ================= MEMORY TIMELINE ================= */
 
@@ -46,6 +49,8 @@ function getSubjectMemory(subject = "user") {
  * Ordered by actual occurrence time
  */
 function getMemoryTimeline(subject = "user", limit = 10) {
+  subject = normalizeSubject(subject);
+
   const semantic = memory
     .summarize(subject)
     .map(f => ({
@@ -53,7 +58,7 @@ function getMemoryTimeline(subject = "user", limit = 10) {
       key: f.key,
       value: f.value,
       source: f.source,
-      time: f.createdAt   // 🔒 when it was told
+      time: f.createdAt   // when it was told
     }));
 
   const episodic = episodicMemory
@@ -63,7 +68,7 @@ function getMemoryTimeline(subject = "user", limit = 10) {
       key: e.key || null,
       value: e.value || null,
       source: e.source || "user",
-      time: e.timestamp
+      time: e.timestamp   // when it occurred
     }));
 
   return [...semantic, ...episodic]
@@ -77,7 +82,6 @@ function getMemoryTimeline(subject = "user", limit = 10) {
       rememberedOn: formatDateTime(item.time)
     }));
 }
-
 
 /* ================= LAST MEMORY EVENT ================= */
 
@@ -100,7 +104,6 @@ function lastMemoryEvent() {
   };
 }
 
-
 /* ================= EXPORTS ================= */
 
 module.exports = {
@@ -108,13 +111,6 @@ module.exports = {
   getMemoryTimeline,
   lastMemoryEvent
 };
-
-
-
-
-
-
-
 
 
 
@@ -133,15 +129,21 @@ module.exports = {
 // const memory = require("./memory");
 // const episodicMemory = require("./episodicMemory");
 
+
 // /* ================= UTIL ================= */
 
-// function formatDate(ts) {
-//   return ts ? new Date(ts).toDateString() : "Unknown";
+// function formatDateTime(ts) {
+//   if (!ts) return "Unknown";
+//   const d = new Date(ts);
+//   return `${d.toDateString()} ${d.toLocaleTimeString()}`;
 // }
 
+
 // /* ================= SUBJECT MEMORY ================= */
+
 // /**
 //  * Returns semantic memory for a subject
+//  * Human-accurate: uses createdAt (when told), not updatedAt
 //  */
 // function getSubjectMemory(subject = "user") {
 //   const facts = memory.summarize(subject);
@@ -151,25 +153,29 @@ module.exports = {
 //     key: f.key,
 //     value: f.value,
 //     confidence: Number(f.confidence.toFixed(2)),
-//     source: f.source,
+//     source: f.source,               // explicit | inferred
 //     category: f.category,
-//     rememberedOn: formatDate(f.updatedAt)
+//     rememberedOn: formatDateTime(f.createdAt),
+//     lastRecalledOn: formatDateTime(f.updatedAt)
 //   }));
 // }
 
+
 // /* ================= MEMORY TIMELINE ================= */
+
 // /**
 //  * Unified timeline of semantic + episodic memory
+//  * Ordered by actual occurrence time
 //  */
 // function getMemoryTimeline(subject = "user", limit = 10) {
 //   const semantic = memory
 //     .summarize(subject)
-//     .slice(0, limit)
 //     .map(f => ({
 //       type: "semantic",
 //       key: f.key,
 //       value: f.value,
-//       time: f.updatedAt
+//       source: f.source,
+//       time: f.createdAt   // 🔒 when it was told
 //     }));
 
 //   const episodic = episodicMemory
@@ -178,6 +184,7 @@ module.exports = {
 //       type: "episodic",
 //       key: e.key || null,
 //       value: e.value || null,
+//       source: e.source || "user",
 //       time: e.timestamp
 //     }));
 
@@ -188,13 +195,16 @@ module.exports = {
 //       type: item.type,
 //       key: item.key,
 //       value: item.value,
-//       rememberedOn: formatDate(item.time)
+//       source: item.source,
+//       rememberedOn: formatDateTime(item.time)
 //     }));
 // }
 
+
 // /* ================= LAST MEMORY EVENT ================= */
+
 // /**
-//  * Last episodic memory event
+//  * Last episodic memory event (true human-like "last thing")
 //  */
 // function lastMemoryEvent() {
 //   const recent = episodicMemory.getRecent(1);
@@ -207,10 +217,11 @@ module.exports = {
 //     subject: ep.subject,
 //     key: ep.key || null,
 //     value: ep.value || null,
-//     source: ep.source || "unknown",
-//     rememberedOn: formatDate(ep.timestamp)
+//     source: ep.source || "user",
+//     rememberedOn: formatDateTime(ep.timestamp)
 //   };
 // }
+
 
 // /* ================= EXPORTS ================= */
 
@@ -219,3 +230,15 @@ module.exports = {
 //   getMemoryTimeline,
 //   lastMemoryEvent
 // };
+
+
+
+
+
+
+
+
+
+
+
+

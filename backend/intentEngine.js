@@ -1,9 +1,10 @@
 /**
- * Lightweight Intent Engine (SAFE FALLBACK)
+ * Intent Engine (SAFE FALLBACK)
  *
- * ⚠️ This file is intentionally conservative.
- * It MUST NOT hallucinate memory or invent intent types.
- * All heavy reasoning is delegated to intentClassifier.js.
+ * ⚠️ Intentionally conservative.
+ * MUST NOT compete with intentClassifier.js
+ * MUST NOT invent memory, subjects, or intents
+ * MUST remain deterministic and safe
  */
 
 function detectIntent(text) {
@@ -20,45 +21,55 @@ function detectIntent(text) {
     return { intent: "INTRODUCE_SELF", rawText: original };
   }
 
-  /* ================= TIME / DATE ================= */
+  /* ================= TIME / DATE (STRICT) ================= */
 
   if (
     lower === "time" ||
-    lower.includes("what time") ||
-    lower.includes("current time")
+    lower === "current time" ||
+    lower.includes("what time")
   ) {
     return { intent: "LOCAL_SKILL", skill: "TIME", rawText: original };
   }
 
   if (
     lower === "date" ||
-    lower.includes("what date") ||
-    lower.includes("today")
+    lower === "today date" ||
+    lower.includes("what date")
   ) {
     return { intent: "LOCAL_SKILL", skill: "DATE", rawText: original };
   }
 
-  /* ================= MEMORY WRITE (STRICT) ================= */
+  /* ================= MEMORY WRITE (ULTRA-STRICT) ================= */
 
-  if (lower.startsWith("remember ") && /\s is \s/i.test(lower)) {
-    const body = original.slice(8);
-    const [key, value] = body.split(/\s+is\s+/i);
+  // Only allow: "remember X is Y"
+  // Block ambiguous keys like "it / this / that"
+  if (
+    lower.startsWith("remember ") &&
+    /\s+is\s+/i.test(lower) &&
+    !/\b(time|date)\b/i.test(lower)
+  ) {
+    const body = original.slice(8).trim();
+    const match = body.match(/^(.+?)\s+is\s+(.+)$/i);
 
-    if (key && value) {
+    if (match) {
+      const key = match[1].trim().toLowerCase();
+
+      if (["it", "this", "that"].includes(key)) {
+        return { intent: "GENERAL_QUESTION", rawText: original };
+      }
+
       return {
         intent: "REMEMBER",
-        key: key.trim(),
-        value: value.trim(),
+        key: match[1].trim(),
+        value: match[2].trim(),
         rawText: original
       };
     }
   }
 
-  /* ================= MEMORY READ ================= */
+  /* ================= MEMORY READ (STRICT) ================= */
 
-  if (
-    /^(what is|who is|who am i|what does)\b/i.test(lower)
-  ) {
+  if (/^(what is|who is|who am i|what does)\b/i.test(lower)) {
     const key = lower
       .replace(/^what is\s+/i, "")
       .replace(/^who am i$/i, "identity")
@@ -66,33 +77,39 @@ function detectIntent(text) {
       .replace(/^what does\s+/i, "")
       .trim();
 
-    return { intent: "RECALL", key, rawText: original };
+    if (key && !["it", "this", "that"].includes(key)) {
+      return { intent: "RECALL", key, rawText: original };
+    }
   }
 
   /* ================= CONTEXT FOLLOW-UP ================= */
 
-  if (lower === "it" || lower === "that") {
+  if (lower === "it" || lower === "that" || lower === "this") {
     return { intent: "RECALL", key: "it", rawText: original };
   }
 
-  /* ================= GREETING ================= */
+  /* ================= SMALL TALK (MINIMAL) ================= */
 
   if (["hi", "hello", "hey"].includes(lower)) {
     return { intent: "SMALLTALK", rawText: original };
   }
 
-  /* ================= OPEN APP ================= */
+  /* ================= OPEN APP (VERY NARROW) ================= */
 
-  if (lower.startsWith("open ")) {
-    const app = lower.replace("open ", "").trim();
-    return { intent: "OPEN_APP", app, rawText: original };
+  // Only allow single-word apps (avoid collisions)
+  if (/^open\s+[a-z]{2,20}$/i.test(lower)) {
+    const app = lower.replace(/^open\s+/i, "").trim();
+
+    if (!["it", "this", "that"].includes(app)) {
+      return { intent: "OPEN_APP", app, rawText: original };
+    }
   }
 
   /* ================= DEFAULT ================= */
 
-  // IMPORTANT:
-  // Do NOT guess memory or facts here.
-  // Let the main classifier / LLM decide.
+  // DO NOT GUESS
+  // DO NOT INVENT
+  // Let main classifier or LLM router decide
   return { intent: "GENERAL_QUESTION", rawText: original };
 }
 
@@ -107,79 +124,119 @@ module.exports = detectIntent;
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
+// /**
+//  * Lightweight Intent Engine (SAFE FALLBACK)
+//  *
+//  * ⚠️ This file is intentionally conservative.
+//  * It MUST NOT hallucinate memory or invent intent types.
+//  * All heavy reasoning is delegated to intentClassifier.js.
+//  */
 
 // function detectIntent(text) {
-//   text = text.toLowerCase();
+//   if (typeof text !== "string" || !text.trim()) {
+//     return { intent: "GENERAL_QUESTION", rawText: "" };
+//   }
 
-//   // MEMORY: remember X is Y
-//   if (text.startsWith("remember")) {
-//     // example: remember my name is atharv
-//     const parts = text.replace("remember", "").trim();
+//   const original = text.trim();
+//   const lower = original.toLowerCase();
 
-//     if (parts.includes(" is ")) {
-//       const [key, value] = parts.split(" is ");
+//   /* ================= SELF / IDENTITY ================= */
+
+//   if (/^(who are you|what are you|introduce yourself)$/i.test(lower)) {
+//     return { intent: "INTRODUCE_SELF", rawText: original };
+//   }
+
+//   /* ================= TIME / DATE ================= */
+
+//   if (
+//     lower === "time" ||
+//     lower.includes("what time") ||
+//     lower.includes("current time")
+//   ) {
+//     return { intent: "LOCAL_SKILL", skill: "TIME", rawText: original };
+//   }
+
+//   if (
+//     lower === "date" ||
+//     lower.includes("what date") ||
+//     lower.includes("today")
+//   ) {
+//     return { intent: "LOCAL_SKILL", skill: "DATE", rawText: original };
+//   }
+
+//   /* ================= MEMORY WRITE (STRICT) ================= */
+
+//   if (lower.startsWith("remember ") && /\s is \s/i.test(lower)) {
+//     const body = original.slice(8);
+//     const [key, value] = body.split(/\s+is\s+/i);
+
+//     if (key && value) {
 //       return {
 //         intent: "REMEMBER",
 //         key: key.trim(),
-//         value: value.trim()
+//         value: value.trim(),
+//         rawText: original
 //       };
 //     }
 //   }
 
-//   // MEMORY: what is X
-//   // MEMORY RECALL — only personal facts
-// if (text.startsWith("what is")) {
-//   const key = text.replace("what is", "").trim();
+//   /* ================= MEMORY READ ================= */
 
-//   // Only recall if it's clearly personal
 //   if (
-//     key.startsWith("my ") ||
-//     key.startsWith("your ") ||
-//     key.includes("name") ||
-//     key.includes("favorite")
+//     /^(what is|who is|who am i|what does)\b/i.test(lower)
 //   ) {
-//     return {
-//       intent: "RECALL",
-//       key
-//     };
+//     const key = lower
+//       .replace(/^what is\s+/i, "")
+//       .replace(/^who am i$/i, "identity")
+//       .replace(/^who is\s+/i, "")
+//       .replace(/^what does\s+/i, "")
+//       .trim();
+
+//     return { intent: "RECALL", key, rawText: original };
 //   }
 
-//   // Otherwise, it's general knowledge → AI
-//   return { intent: "UNKNOWN" };
-// }
+//   /* ================= CONTEXT FOLLOW-UP ================= */
 
-
-//   if (text.includes("hello") || text.includes("hi")) {
-//     return { intent: "GREET" };
+//   if (lower === "it" || lower === "that") {
+//     return { intent: "RECALL", key: "it", rawText: original };
 //   }
 
-//   if (text.includes("time")) {
-//     return { intent: "GET_TIME" };
+//   /* ================= GREETING ================= */
+
+//   if (["hi", "hello", "hey"].includes(lower)) {
+//     return { intent: "SMALLTALK", rawText: original };
 //   }
 
-//   if (text.includes("date")) {
-//     return { intent: "GET_DATE" };
+//   /* ================= OPEN APP ================= */
+
+//   if (lower.startsWith("open ")) {
+//     const app = lower.replace("open ", "").trim();
+//     return { intent: "OPEN_APP", app, rawText: original };
 //   }
 
-//   if (text.includes("open")) {
-//     const app = text.replace("open", "").trim();
-//     return { intent: "OPEN_APP", app };
-//   }
+//   /* ================= DEFAULT ================= */
 
-//   return { intent: "UNKNOWN" };
+//   // IMPORTANT:
+//   // Do NOT guess memory or facts here.
+//   // Let the main classifier / LLM decide.
+//   return { intent: "GENERAL_QUESTION", rawText: original };
 // }
 
 // module.exports = detectIntent;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 

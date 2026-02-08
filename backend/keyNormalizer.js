@@ -38,28 +38,3 @@ module.exports = normalizeKey;
 
 
 
-
-
-
-
-// function normalizeKey(key) {
-//   if (!key) return "";
-
-//   key = key.toLowerCase();
-
-//   // remove pronouns
-//   key = key.replace(/\b(my|your|his|her|their)\b/g, "");
-
-//   // remove punctuation (CRITICAL FIX)
-//   key = key.replace(/[^a-z0-9\s]/g, "");
-
-//   // normalize spaces
-//   key = key.replace(/\s+/g, " ").trim();
-
-//   // normalize synonyms
-//   if (key.includes("birth")) return "birthday";
-
-//   return key;
-// }
-
-// module.exports = normalizeKey;

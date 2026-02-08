@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8" />
+<title>Arvsal</title>
+<style>
+body { margin:0; font-family:Arial; background:#0f172a; color:#e5e7eb; display:flex; flex-direction:column; height:100vh; }
+#chat { flex:1; padding:16px; overflow-y:auto; }
+#input { display:flex; padding:10px; border-top:1px solid #334155; }
+input { flex:1; padding:10px; background:#020617; color:white; border:1px solid #334155; outline:none; }
+button { margin-left:10px; padding:10px 16px; background:#2563eb; color:white; border:none; cursor:pointer; }
+</style>
+</head>
+<body>
+
+<div id="chat">
+<h3>🧠 Arvsal is running</h3>
+</div>
+
+<div id="input">
+<input id="command" placeholder="Type a command..." />
+<button id="sendBtn">Send</button>
+<button id="micBtn">🎤</button>
+</div>
+
+<script>
+
+const chat = document.getElementById("chat");
+const input = document.getElementById("command");
+const sendBtn = document.getElementById("sendBtn");
+const micBtn = document.getElementById("micBtn");
+
+let mediaRecorder = null;
+let audioChunks = [];
+let micActive = false;
+
+/* ================= CHAT ================= */
+
+function addMessage(sender, text) {
+  chat.innerHTML += `<p><b>${sender}:</b> ${text}</p>`;
+  chat.scrollTop = chat.scrollHeight;
+}
+
+sendBtn.onclick = () => {
+  const text = input.value.trim();
+  input.value = "";
+  if (text) handleText(text);
+};
+
+/* ================= TEXT FLOW ================= */
+
+async function handleText(text) {
+
+  addMessage("You", text);
+
+  const res = await window.arvsal.sendCommand(text);
+
+  if (!res?.reply) return;
+
+  addMessage("Arvsal", res.reply);
+
+  await speak(res.reply);
+
+  // 🔥 After reply → start follow-up mic
+  startMic(true);
+}
+
+/* ================= SPEAK ================= */
+
+async function speak(text) {
+
+  const audioBuffer = await window.arvsal.speak(text);
+
+  const blob = new Blob([audioBuffer], { type: "audio/wav" });
+  const url = URL.createObjectURL(blob);
+
+  return new Promise(resolve => {
+    const audio = new Audio(url);
+    audio.onended = () => {
+      URL.revokeObjectURL(url);
+      resolve();
+    };
+    audio.play();
+  });
+}
+
+/* ================= MIC ================= */
+
+async function startMic(isFollowUp = false) {
+
+  if (micActive) return;
+
+  micActive = true;
+  micBtn.textContent = "🎙️";
+
+  // 🔥 Stop wake ONLY if this is NOT follow-up
+  if (!isFollowUp) {
+    window.arvsal.stopWake();
+  }
+
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+  const audioContext = new AudioContext();
+  const source = audioContext.createMediaStreamSource(stream);
+  const analyser = audioContext.createAnalyser();
+  analyser.fftSize = 2048;
+  source.connect(analyser);
+
+  mediaRecorder = new MediaRecorder(stream, {
+    mimeType: "audio/webm;codecs=opus"
+  });
+
+  audioChunks = [];
+
+  let hasSpoken = false;
+  let silenceTimer = null;
+  let noSpeechTimer = null;
+  let grace = true;
+
+  setTimeout(() => grace = false, 800);
+
+  mediaRecorder.ondataavailable = e => {
+    if (e.data.size > 0) audioChunks.push(e.data);
+  };
+
+  mediaRecorder.onstop = async () => {
+
+    micActive = false;
+    micBtn.textContent = "🎤";
+
+    stream.getTracks().forEach(t => t.stop());
+    clearTimeout(silenceTimer);
+    clearTimeout(noSpeechTimer);
+
+    if (audioChunks.length > 0) {
+
+      const blob = new Blob(audioChunks, { type: "audio/webm" });
+      const buffer = await blob.arrayBuffer();
+      const res = await window.arvsal.sendAudio(buffer);
+
+      if (res?.text) {
+        await handleText(res.text);
+        return; // 🔥 follow-up chain controls wake
+      }
+    }
+
+    // 🔥 Always resume wake if no further speech
+    window.arvsal.resumeWake();
+  };
+
+  mediaRecorder.start();
+
+  const data = new Uint8Array(analyser.frequencyBinCount);
+
+  // 🔥 If follow-up and no speech → stop after 5s
+  if (isFollowUp) {
+    noSpeechTimer = setTimeout(() => {
+      if (!hasSpoken && mediaRecorder.state === "recording") {
+        mediaRecorder.stop();
+      }
+    }, 5000);
+  }
+
+  const detectSilence = () => {
+
+    analyser.getByteTimeDomainData(data);
+
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) {
+      const val = (data[i] - 128) / 128;
+      sum += val * val;
+    }
+
+    const rms = Math.sqrt(sum / data.length);
+
+    if (rms > 0.02) {
+      hasSpoken = true;
+      clearTimeout(noSpeechTimer);
+    }
+
+    if (!grace && hasSpoken && rms < 0.015) {
+
+      if (!silenceTimer) {
+        silenceTimer = setTimeout(() => {
+          if (mediaRecorder.state === "recording") {
+            mediaRecorder.stop();
+          }
+        }, 1200);
+      }
+
+    } else {
+      clearTimeout(silenceTimer);
+      silenceTimer = null;
+    }
+
+    if (mediaRecorder.state === "recording") {
+      requestAnimationFrame(detectSilence);
+    }
+  };
+
+  detectSilence();
+}
+
+micBtn.onclick = () => startMic(false);
+
+/* ================= WAKE ================= */
+
+window.arvsal.onWake(async () => {
+
+  if (micActive) return;
+
+  // 🔥 stop wake explicitly before speaking
+  window.arvsal.stopWake();
+
+  await speak("Yes sir.");
+
+  startMic(false);
+});
+
+</script>
+</body>
+</html>
+
+
+
+
+
+
+
+
+
+
+

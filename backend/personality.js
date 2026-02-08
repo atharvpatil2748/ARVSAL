@@ -1,65 +1,139 @@
 /**
- * Personality Layer
- * FINAL AUTHORITY GATE
+ * Personality Layer (Deterministic, Zero-Latency)
  *
- * - LLM is OPTIONAL
- * - Memory & system replies are SACRED
+ * NO LLM calls.
+ * NO rewriting.
+ * NO hallucinations.
  */
 
-const { enhanceWithLLM } = require("./personalityLLM");
+ /* ================= INTERNAL STATE ================= */
 
 let replyCount = 0;
 let lastAddressedAt = 0;
-const ADDRESS_NAME = "Sir";
 
-// intents / replies that must NEVER be rewritten
-const HARD_NO_LLM = /(your .* is|you told me|stored as memory|explicit memory|today,|on .* we talked|i don’t have|i don't have|are you sure|opening|system locked|volume|searching|forgotten)/i;
+const ADDRESS_TERM = "sir";
+
+/* ================= HARD BLOCK ================= */
+
+// Replies that must NEVER be touched or styled
+const HARD_NO_LLM = new RegExp(
+  [
+    "\\byour\\s+[a-z]{2,20}\\s+is\\b",
+    "\\byou told me\\b",
+    "\\bstored as memory\\b",
+    "\\bexplicit memory\\b",
+    "\\bare you sure\\b",
+    "\\bopening\\b",
+    "\\bsystem locked\\b",
+    "\\bvolume (increased|decreased|muted)\\b",
+    "\\blocked\\b",
+    "\\bcurrent time\\b",
+    "\\btoday'?s date\\b",
+    "\\btemperature\\b",
+    "\\bweather\\b",
+    "\\bnews\\b"
+  ].join("|"),
+  "i"
+);
+
+/* ================= CODE DETECTION ================= */
+
+// 🚨 Any code-like output must NEVER be modified
+function containsCode(text) {
+  return (
+    /```[\s\S]*?```/.test(text) ||            // fenced code
+    /^\s*#include\s+</m.test(text) ||         // C / C++
+    /^\s*(int|void|char|float|double)\s+\w+/m.test(text) ||
+    /^\s*function\s+\w+/m.test(text) ||       // JS
+    /^\s*\w+\s*=\s*function/m.test(text) ||
+    /^\s*class\s+\w+/m.test(text) ||
+    /^\s*def\s+\w+/m.test(text) ||            // Python
+    /;\s*$/.test(text)                        // code-like ending
+  );
+}
+
+/* ================= MAIN ================= */
 
 async function applyPersonality(text) {
-  if (typeof text !== "string") text = String(text ?? "");
+  if (typeof text !== "string") return "";
   text = text.trim();
-  if (!text) return "I’m not sure about that.";
+  if (!text) return "";
 
-  // Remove leakage
+  // Remove accidental "Arvsal:" prefix leakage
   text = text.replace(/^(arvsal\s*:\s*)+/i, "");
 
   replyCount++;
   const lower = text.toLowerCase();
 
-  // 🔒 ABSOLUTE NO-LLM ZONE
+  /* 🔒 ABSOLUTE PRESERVATION RULES */
+
+  // Code must remain untouched
+  if (containsCode(text)) {
+    return text;
+  }
+
+  // System / memory / action responses
   if (HARD_NO_LLM.test(lower)) {
-    return maybeAddress(ensurePunctuation(text));
+    return finalize(text);
   }
 
-  // very short replies → keep simple
-  if (text.length <= 12) {
-    return maybeAddress(ensurePunctuation(text));
+  // Long or technical responses (essay, explanation, steps)
+  if (
+    text.length > 300 ||
+    /step by step|essay|algorithm|equation|proof/i.test(lower)
+  ) {
+    return finalize(text);
   }
 
-  let finalText = text;
-
-  // 🧠 Allow LLM ONLY for conversational polish
-  try {
-    finalText = await enhanceWithLLM(text);
-  } catch {
-    finalText = text;
+  // Very short confirmations
+  if (
+    text.length <= 6 &&
+    /^(ok|okay|sure|done|yes|no)$/i.test(lower)
+  ) {
+    return finalize(text);
   }
 
-  return maybeAddress(ensurePunctuation(finalText));
+  // Normal conversational response
+  return finalize(text);
 }
 
-/* ================= ADDRESSING ================= */
+/* ================= FINALIZATION ================= */
+
+function finalize(text) {
+  return maybeAddress(ensurePunctuation(text));
+}
+
+/* ================= JARVIS-STYLE ADDRESSING ================= */
 
 function maybeAddress(text) {
+  const lower = text.toLowerCase();
+
+  // 🚫 Never address in commands, memory, system replies
+  if (
+    HARD_NO_LLM.test(lower) ||
+    text.length < 12 ||
+    /^(yes|no|ok|okay|done)$/i.test(lower)
+  ) {
+    return text;
+  }
+
+  // 🧠 Natural Jarvis spacing
   const shouldAddress =
-    replyCount - lastAddressedAt >= 2 &&
-    Math.random() < 0.4 &&
-    !/^sir[, ]/i.test(text);
+    replyCount - lastAddressedAt >= 4 && // not frequent
+    Math.random() < 0.3 &&               // occasional
+    !/^sir[, ]/i.test(text);             // no duplication
 
   if (shouldAddress) {
     lastAddressedAt = replyCount;
-    return `${ADDRESS_NAME}, ${text}`;
+
+    // Two Jarvis-style forms
+    if (Math.random() < 0.5) {
+      return `Sir, ${text}`;
+    } else {
+      return `${text.replace(/[.!?]?$/, `, ${ADDRESS_TERM}.`)}`;
+    }
   }
+
   return text;
 }
 
@@ -68,6 +142,8 @@ function maybeAddress(text) {
 function ensurePunctuation(text) {
   return /[.!?]$/.test(text) ? text : text + ".";
 }
+
+/* ================= EXPORT ================= */
 
 module.exports = applyPersonality;
 
@@ -83,101 +159,147 @@ module.exports = applyPersonality;
 
 
 
-
 // /**
 //  * Personality Layer
-//  * Final response gate before speaking
-//  * Deterministic, human, non-robotic
+//  *
+//  * FINAL AUTHORITY GATE
+//  *
+//  * - LLM is OPTIONAL
+//  * - Memory & system replies are SACRED
+//  * - CODE OUTPUT IS SACRED
+//  * - NEVER distorts long-form or technical answers
+//  * - NEVER invents facts or uncertainty
 //  */
 
-// let responseCount = 0;
-// const USER_ADDRESS = "Atharv Sir";
+// const { enhanceWithLLM } = require("./personalityLLM");
 
-// function applyPersonality(text) {
-//   if (typeof text !== "string") text = String(text ?? "");
+// /* ================= INTERNAL STATE ================= */
+
+// let replyCount = 0;
+// let lastAddressedAt = 0;
+
+// const ADDRESS_PREFIX = null;
+
+// /* ================= HARD BLOCK ================= */
+
+// const HARD_NO_LLM = new RegExp(
+//   [
+//     "\\byour\\s+[a-z]{2,20}\\s+is\\b",
+//     "\\byou told me\\b",
+//     "\\bstored as memory\\b",
+//     "\\bexplicit memory\\b",
+//     "\\bare you sure\\b",
+//     "\\bopening\\b",
+//     "\\bsystem locked\\b",
+//     "\\bvolume (increased|decreased|muted)\\b",
+//     "\\blocked\\b"
+//   ].join("|"),
+//   "i"
+// );
+
+// /* ================= CODE DETECTION (CRITICAL FIX) ================= */
+
+// // ANY of these → DO NOT TOUCH
+// function containsCode(text) {
+//   return (
+//     /```[\s\S]*?```/.test(text) ||          // fenced code
+//     /^\s*#include\s+</m.test(text) ||       // C / C++
+//     /^\s*(int|void|char|float|double)\s+\w+/m.test(text) ||
+//     /^\s*function\s+\w+/m.test(text) ||     // JS
+//     /^\s*\w+\s*=\s*function/m.test(text) ||
+//     /^\s*class\s+\w+/m.test(text) ||
+//     /^\s*def\s+\w+/m.test(text) ||          // Python
+//     /;\s*$/.test(text)                      // code-like ending
+//   );
+// }
+
+// /* ================= MAIN ================= */
+
+// async function applyPersonality(text) {
+//   if (typeof text !== "string") return "";
 //   text = text.trim();
+//   if (!text) return "";
 
-//   if (!text) return "I’m not sure about that.";
-
-//   // Remove self-name leakage
+//   // Remove accidental self-prefix leakage
 //   text = text.replace(/^(arvsal\s*:\s*)+/i, "");
 
-//   // Absolute identity lock
-//   if (text.startsWith("I am Arvsal —")) return text;
-
+//   replyCount++;
 //   const lower = text.toLowerCase();
 
-//   /* =====================================================
-//      🔒 Epistemic / memory statements — DO NOT MODIFY
-//   ===================================================== */
+//   /* 🔒 ABSOLUTE CODE PRESERVATION */
+//   if (containsCode(text)) {
+//     return text; // 🚨 DO NOT TOUCH
+//   }
+
+//   /* 🔒 SYSTEM / MEMORY / ACTION RESPONSES */
+//   if (HARD_NO_LLM.test(lower)) {
+//     return finalize(text);
+//   }
+
+//   /* 🔒 LONG / TECHNICAL RESPONSES */
 //   if (
-//     /(i don’t know|i do not know|i am not sure|i recall|i remember|you told me|stored as memory|explicit memory|when you told me)/i.test(
-//       lower
-//     )
+//     text.length > 300 ||
+//     /step by step|essay|algorithm|equation|proof/i.test(lower)
 //   ) {
-//     responseCount++;
-//     return /[.!?]$/.test(text) ? text : text + ".";
+//     return finalize(text);
 //   }
 
-//   /* =====================================================
-//      🧠 Explicit explanation / length requests
-//      → NEVER trim these
-//   ===================================================== */
-//   const explicitLengthRequest =
-//     /(in\s+\d+\s+sentences|explain|describe|in detail|tell me more|elaborate)/i.test(
-//       lower
-//     );
-
-//   /* =====================================================
-//      💙 Emotional user input → gentle expansion
-//   ===================================================== */
-//   const emotionalInput =
-//     /(tired|sad|exhausted|hectic|stress|stressed|happy|upset|bad day|long day)/i.test(
-//       lower
-//     );
-
-//   if (emotionalInput && !explicitLengthRequest) {
-//     responseCount++;
-//     const suffix =
-//       " Sir, that can really drain your energy. Take a moment to breathe and give yourself some rest—you deserve it.";
-//     return (
-//       text +
-//       (/[.!?]$/.test(text) ? "" : ".") +
-//       suffix
-//     );
+//   /* 🔒 VERY SHORT CONFIRMATIONS */
+//   if (
+//     text.length <= 6 &&
+//     /^(ok|okay|sure|done|yes|no)$/i.test(lower)
+//   ) {
+//     return finalize(text);
 //   }
 
-//   /* =====================================================
-//      ✂️ Soft sentence cap (ONLY if not explicitly requested)
-//   ===================================================== */
-//   if (!explicitLengthRequest) {
-//     const sentences = text.match(/[^.!?]+[.!?]*/g);
-//     if (sentences && sentences.length > 3) {
-//       text = sentences.slice(0, 3).join(" ").trim();
+//   /* 🧠 LIGHT CONVERSATIONAL POLISH ONLY */
+//   try {
+//     const enhanced = await enhanceWithLLM(text, {
+//       forbidQuestions: true,
+//       keepMeaning: true,
+//       forbidMemoryClaims: true,
+//       forbidTimeClaims: true
+//     });
+
+//     if (typeof enhanced === "string" && enhanced.trim()) {
+//       return finalize(enhanced.trim());
 //     }
+//   } catch {
+//     // absolute fail-safe
 //   }
 
-//   /* =====================================================
-//      👑 Addressing cadence (every ~3 responses)
-//      Natural, not mechanical
-//   ===================================================== */
-//   responseCount++;
+//   return finalize(text);
+// }
+
+// /* ================= FINALIZATION ================= */
+
+// function finalize(text) {
+//   return maybeAddress(ensurePunctuation(text));
+// }
+
+// /* ================= ADDRESSING ================= */
+
+// function maybeAddress(text) {
+//   if (!ADDRESS_PREFIX) return text;
 
 //   const shouldAddress =
-//     responseCount % 3 === 0 &&      // cadence
-//     text.length > 40 &&             // avoid tiny replies
-//     !emotionalInput;                // never during emotions
+//     replyCount - lastAddressedAt >= 3 &&
+//     Math.random() < 0.25 &&
+//     !new RegExp(`^${ADDRESS_PREFIX}[, ]`, "i").test(text);
 
 //   if (shouldAddress) {
-//     text = `${USER_ADDRESS}, ${text}`;
+//     lastAddressedAt = replyCount;
+//     return `${ADDRESS_PREFIX}, ${text}`;
 //   }
-
-//   // Final punctuation guarantee
-//   if (!/[.!?]$/.test(text)) text += ".";
 
 //   return text;
 // }
 
-// module.exports = applyPersonality;
+// /* ================= HELPERS ================= */
 
+// function ensurePunctuation(text) {
+//   return /[.!?]$/.test(text) ? text : text + ".";
+// }
+
+// module.exports = applyPersonality;
 

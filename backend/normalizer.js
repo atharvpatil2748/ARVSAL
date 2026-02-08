@@ -1,6 +1,7 @@
 /**
  * Normalizer
- * - Preserves original user text (for LLM & math & punctuation)
+ *
+ * - Preserves original user text (for LLM, UI, math, code)
  * - Provides normalized text ONLY for intent detection
  * - Deterministic, memory-safe, backward-compatible
  */
@@ -13,27 +14,27 @@ function normalize(input) {
       normalizedSafe: true
     };
 
-    // backward compatibility
+    // 🔒 legacy-safe
     empty.toString = () => "";
-    return empty;
+    return Object.freeze(empty);
   }
 
   const rawText = input.trim();
 
   /* =====================================================
      🔒 NORMALIZED VERSION (INTENT ONLY)
-     - NEVER used directly for memory storage
-     - Possessive handled explicitly to avoid ambiguity
+     - NEVER used for memory
+     - NEVER shown to user
   ===================================================== */
 
   const normalizedText = rawText
     .toLowerCase()
 
-    // 🔒 remove possessive FIRST (critical for memory safety)
+    // 🔒 remove possessive FIRST
     .replace(/'s\b/g, "")
 
-    // keep letters, numbers, math symbols, comparison, equals
-    .replace(/[^a-z0-9+\-*/=().%^,<>\s]/g, " ")
+    // allow math, comparison, time, ratios, URLs
+    .replace(/[^a-z0-9+\-*/=().%^,:<>\/\s]/g, " ")
 
     .replace(/\s+/g, " ")
     .trim();
@@ -42,23 +43,24 @@ function normalize(input) {
     rawText,
     normalizedText,
 
-    // 🔑 explicit marker: safe ONLY for intent detection
+    // explicit marker: intent-only safe
     normalizedSafe: true
   };
 
   /**
-   * 🔁 BACKWARD COMPATIBILITY
-   * Any code doing normalize(text).toLowerCase()
-   * or treating normalize() as string will still work
+   * 🔁 BACKWARD COMPATIBILITY (CRITICAL)
+   * Any legacy code treating normalize() as string
+   * must receive RAW TEXT, not stripped text.
    */
-  result.toString = () => normalizedText;
+  Object.defineProperty(result, "toString", {
+    value: () => rawText,
+    enumerable: false
+  });
 
-  return result;
+  return Object.freeze(result);
 }
 
 module.exports = normalize;
-
-
 
 
 
@@ -76,14 +78,15 @@ module.exports = normalize;
 //  * Normalizer
 //  * - Preserves original user text (for LLM & math & punctuation)
 //  * - Provides normalized text ONLY for intent detection
-//  * - Backward-compatible with existing code
+//  * - Deterministic, memory-safe, backward-compatible
 //  */
 
 // function normalize(input) {
 //   if (!input || typeof input !== "string") {
 //     const empty = {
 //       rawText: "",
-//       normalizedText: ""
+//       normalizedText: "",
+//       normalizedSafe: true
 //     };
 
 //     // backward compatibility
@@ -93,17 +96,30 @@ module.exports = normalize;
 
 //   const rawText = input.trim();
 
-//   // 🔒 NORMALIZED VERSION (INTENT ONLY)
+//   /* =====================================================
+//      🔒 NORMALIZED VERSION (INTENT ONLY)
+//      - NEVER used directly for memory storage
+//      - Possessive handled explicitly to avoid ambiguity
+//   ===================================================== */
+
 //   const normalizedText = rawText
 //     .toLowerCase()
+
+//     // 🔒 remove possessive FIRST (critical for memory safety)
+//     .replace(/'s\b/g, "")
+
 //     // keep letters, numbers, math symbols, comparison, equals
 //     .replace(/[^a-z0-9+\-*/=().%^,<>\s]/g, " ")
+
 //     .replace(/\s+/g, " ")
 //     .trim();
 
 //   const result = {
 //     rawText,
-//     normalizedText
+//     normalizedText,
+
+//     // 🔑 explicit marker: safe ONLY for intent detection
+//     normalizedSafe: true
 //   };
 
 //   /**
@@ -125,16 +141,7 @@ module.exports = normalize;
 
 
 
-// function normalize(text) {
-//   if (!text || typeof text !== "string") return "";
 
-//   return text
-//     .toLowerCase()
-//     // keep letters, numbers, math operators
-//     .replace(/[^a-z0-9+\-*/().\s]/g, "")
-//     .replace(/\s+/g, " ")
-//     .trim();
-// }
 
-// module.exports = normalize;
+
 

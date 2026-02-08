@@ -1,59 +1,112 @@
 const chat = document.getElementById("chat");
 const input = document.getElementById("command");
+const sendBtn = document.getElementById("sendBtn");
+const micBtn = document.getElementById("micBtn");
 
-/* ================= CHAT HELPERS ================= */
+/* ================= UTIL ================= */
 
-function appendMessage(role, text) {
+function escapeHTML(str) {
+  return str.replace(/[&<>"']/g, m =>
+    ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[m])
+  );
+}
+
+/* ================= RENDER ================= */
+
+function renderMessage(role, rawText) {
   const div = document.createElement("div");
-  div.style.marginBottom = "6px";
-  div.innerText = (role === "user" ? "You: " : "Arvsal: ") + text;
+  div.className = `message ${role}`;
+
+  const { html, spokenText } = render(rawText);
+
+  div.innerHTML = `
+    <strong>${role === "user" ? "You" : "Arvsal"}:</strong>
+    ${html}
+  `;
+
   chat.appendChild(div);
+
+  Prism.highlightAllUnder(div);
+  if (window.MathJax) MathJax.typesetPromise([div]).catch(() => {});
   chat.scrollTop = chat.scrollHeight;
+
+  if (role === "arvsal") speak(spokenText);
+
+  // Copy buttons
+  div.querySelectorAll(".copy-btn").forEach(btn => {
+    btn.onclick = () => {
+      const code = btn.closest(".code-wrapper").querySelector("code").textContent;
+      navigator.clipboard.writeText(code);
+      btn.textContent = "Copied!";
+      setTimeout(() => (btn.textContent = "Copy"), 1200);
+    };
+  });
 }
 
-/* ================= HISTORY (ONLY ON LOAD) ================= */
+/* ================= MARKDOWN + CODE ================= */
 
-async function loadHistory() {
-  try {
-    const res = await fetch("http://localhost:3000/history");
-    const history = await res.json();
+function render(text) {
+  let spokenText = text;
+  let html = "";
 
-    chat.innerHTML = "";
-    history.forEach(m => appendMessage(m.role, m.text));
-  } catch (e) {
-    console.error("History load failed", e);
+  const fenceRegex = /```([\w+-]*)\n([\s\S]*?)```/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = fenceRegex.exec(text)) !== null) {
+    // Text before code
+    const before = text.slice(lastIndex, match.index);
+    html += escapeHTML(before).replace(/\n/g, "<br>");
+
+    // Remove code from TTS
+    spokenText = spokenText.replace(match[0], "");
+
+    const lang = match[1] || "text";
+    const code = match[2];
+
+    html += `
+      <div class="code-wrapper">
+        <button class="copy-btn">Copy</button>
+        <pre><code class="language-${lang}">${escapeHTML(code)}</code></pre>
+      </div>
+    `;
+
+    lastIndex = fenceRegex.lastIndex;
   }
+
+  // Remaining text
+  html += escapeHTML(text.slice(lastIndex)).replace(/\n/g, "<br>");
+
+  return { html, spokenText: spokenText.trim() };
 }
 
-/* ================= SEND COMMAND ================= */
+/* ================= SEND ================= */
 
-async function sendCommand(textOverride) {
+async function send(textOverride) {
   const text = textOverride || input.value.trim();
   if (!text) return;
 
   input.value = "";
+  renderMessage("user", text);
 
-  // ✅ SHOW USER MESSAGE IMMEDIATELY
-  appendMessage("user", text);
+  const res = await fetch("http://localhost:3000/command", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ command: text })
+  });
 
-  try {
-    const res = await fetch("http://localhost:3000/command", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ command: text })
-    });
-
-    const data = await res.json();
-
-    // ✅ SHOW ARVSAL MESSAGE IMMEDIATELY
-    if (data.reply && data.reply !== "__HANDLED_EXTERNALLY__") {
-      appendMessage("arvsal", data.reply);
-      speak(data.reply);
-    }
-  } catch (err) {
-    console.error("Backend error", err);
-  }
+  const data = await res.json();
+  if (data.reply) renderMessage("arvsal", data.reply);
 }
+
+sendBtn.onclick = () => send();
+
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    send();
+  }
+});
 
 /* ================= TTS ================= */
 
@@ -107,62 +160,44 @@ function speakNext() {
   speechSynthesis.speak(u);
 }
 
-/* ================= SPEECH RECOGNITION ================= */
+/* ================= MIC ================= */
 
 const SpeechRecognition =
   window.SpeechRecognition || window.webkitSpeechRecognition;
 
 let recognition;
-let micBusy = false;
 let listening = false;
 
 if (SpeechRecognition) {
   recognition = new SpeechRecognition();
   recognition.lang = "en-US";
   recognition.interimResults = false;
-  recognition.continuous = false;
 
   recognition.onresult = e => {
-    micBusy = false;
-    sendCommand(e.results[0][0].transcript.trim());
+    listening = false;
+    micBtn.classList.remove("listening");
+    send(e.results[0][0].transcript);
   };
 
   recognition.onend = () => {
-    micBusy = false;
-    if (listening && !speaking) startMic();
+    listening = false;
+    micBtn.classList.remove("listening");
   };
 }
 
-function startMic() {
-  if (micBusy || speaking) return;
-  try {
-    micBusy = true;
+micBtn.onclick = () => {
+  if (!recognition || speaking) return;
+
+  if (listening) {
+    recognition.stop();
+    micBtn.classList.remove("listening");
+    listening = false;
+  } else {
     recognition.start();
-  } catch {}
-}
-
-function toggleMic() {
-  if (!recognition) return alert("Speech recognition not supported");
-
-  listening = !listening;
-
-  if (listening) startMic();
-  else {
-    micBusy = false;
-    speechSynthesis.cancel();
-    queue = [];
-    speaking = false;
-    try { recognition.abort(); } catch {}
+    micBtn.classList.add("listening");
+    listening = true;
   }
-}
-
-/* ================= INIT ================= */
-
-loadHistory(); // ONLY once
-
-
-
-
+};
 
 
 
@@ -175,119 +210,40 @@ loadHistory(); // ONLY once
 // const chat = document.getElementById("chat");
 // const input = document.getElementById("command");
 
-// // ================= UNLOCK AUDIO =================
-// let audioUnlocked = false;
+// /* ================= CHAT HELPERS ================= */
 
-// function unlockAudio() {
-//   if (audioUnlocked) return;
-
-//   try {
-//     const u = new SpeechSynthesisUtterance("");
-//     speechSynthesis.speak(u); // 🔒 real unlock
-//     audioUnlocked = true;
-//     console.log("🔓 Audio unlocked");
-//   } catch {}
+// function appendMessage(role, text) {
+//   const div = document.createElement("div");
+//   div.style.marginBottom = "6px";
+//   div.innerText = (role === "user" ? "You: " : "Arvsal: ") + text;
+//   chat.appendChild(div);
+//   chat.scrollTop = chat.scrollHeight;
 // }
 
-// ["click", "keydown", "touchstart"].forEach(evt => {
-//   document.addEventListener(evt, unlockAudio, { once: true });
-// });
+// /* ================= HISTORY (ONLY ON LOAD) ================= */
 
-// // ================= CHAT HISTORY =================
 // async function loadHistory() {
 //   try {
 //     const res = await fetch("http://localhost:3000/history");
 //     const history = await res.json();
 
 //     chat.innerHTML = "";
-//     history.forEach(msg => {
-//       const div = document.createElement("div");
-//       div.style.marginBottom = "6px";
-//       div.innerText =
-//         (msg.role === "user" ? "You: " : "Arvsal: ") + msg.text;
-//       chat.appendChild(div);
-//     });
-
-//     chat.scrollTop = chat.scrollHeight;
-//   } catch {}
-// }
-
-// // ================= TEXT SPLIT =================
-// function splitText(text, max = 220) {
-//   const parts = [];
-//   let current = "";
-
-//   for (const word of text.split(" ")) {
-//     if ((current + word).length <= max) {
-//       current += word + " ";
-//     } else {
-//       parts.push(current.trim());
-//       current = word + " ";
-//     }
+//     history.forEach(m => appendMessage(m.role, m.text));
+//   } catch (e) {
+//     console.error("History load failed", e);
 //   }
-//   if (current.trim()) parts.push(current.trim());
-//   return parts;
 // }
 
-// // ================= BROWSER TTS =================
-// let speaking = false;
-// let queue = [];
-// let lastSpoken = ""; // 🔒 prevent duplicate speech
+// /* ================= SEND COMMAND ================= */
 
-// let voices = [];
-// speechSynthesis.onvoiceschanged = () => {
-//   voices = speechSynthesis.getVoices();
-// };
-
-// function speak(text) {
-//   if (!text) return;
-//   if (text === "__HANDLED_EXTERNALLY__") return;
-//   if (text === lastSpoken) return;
-
-//   lastSpoken = text;
-
-//   // Cancel ONLY for new reply
-//   speechSynthesis.cancel();
-
-//   // Stop mic while speaking
-//   if (recognition) {
-//     try { recognition.abort(); } catch {}
-//   }
-
-//   queue = splitText(text);
-//   speaking = true;
-
-//   speakNext();
-// }
-
-// function speakNext() {
-//   if (queue.length === 0) {
-//     speaking = false;
-//     if (listening) setTimeout(forceRestartMic, 800);
-//     return;
-//   }
-
-//   const utterance = new SpeechSynthesisUtterance(queue.shift());
-
-//   utterance.rate = 1.10;
-//   utterance.pitch = 0.9;
-//   utterance.volume = 1;
-
-//   const preferredVoice = voices.find(v =>
-//     v.name.includes("Google UK English Male")
-//   );
-//   if (preferredVoice) utterance.voice = preferredVoice;
-
-//   utterance.onend = speakNext;
-//   speechSynthesis.speak(utterance);
-// }
-
-// // ================= SEND COMMAND =================
 // async function sendCommand(textOverride) {
 //   const text = textOverride || input.value.trim();
 //   if (!text) return;
 
 //   input.value = "";
+
+//   // ✅ SHOW USER MESSAGE IMMEDIATELY
+//   appendMessage("user", text);
 
 //   try {
 //     const res = await fetch("http://localhost:3000/command", {
@@ -297,9 +253,10 @@ loadHistory(); // ONLY once
 //     });
 
 //     const data = await res.json();
-//     await loadHistory();
 
+//     // ✅ SHOW ARVSAL MESSAGE IMMEDIATELY
 //     if (data.reply && data.reply !== "__HANDLED_EXTERNALLY__") {
+//       appendMessage("arvsal", data.reply);
 //       speak(data.reply);
 //     }
 //   } catch (err) {
@@ -307,349 +264,23 @@ loadHistory(); // ONLY once
 //   }
 // }
 
-// // ================= SPEECH RECOGNITION =================
-// const SpeechRecognition =
-//   window.SpeechRecognition || window.webkitSpeechRecognition;
+// /* ================= TTS ================= */
 
-// let recognition;
-// let listening = false;
-// let micBusy = false;
-
-// if (SpeechRecognition) {
-//   recognition = new SpeechRecognition();
-//   recognition.lang = "en-US";
-//   recognition.interimResults = false;
-//   recognition.continuous = false;
-
-//   recognition.onresult = (event) => {
-//     const text = event.results[0][0].transcript.trim();
-//     if (!text) return;
-//     micBusy = true;
-//     sendCommand(text);
-//   };
-
-//   recognition.onerror = () => {
-//     micBusy = false;
-//     if (listening && !speaking) {
-//       setTimeout(forceRestartMic, 800);
-//     }
-//   };
-
-//   recognition.onend = () => {
-//     micBusy = false;
-//     if (listening && !speaking) {
-//       setTimeout(forceRestartMic, 800);
-//     }
-//   };
-// }
-
-// // ================= MIC CONTROL =================
-// function forceRestartMic() {
-//   if (!listening || micBusy || speaking) return;
-//   try {
-//     recognition.start();
-//     console.log("🎙 Mic restarted");
-//   } catch {}
-// }
-
-// function toggleMic() {
-//   if (!recognition) {
-//     alert("Speech recognition not supported");
-//     return;
-//   }
-
-//   if (!listening) {
-//     listening = true;
-//     forceRestartMic();
-//     console.log("🎙 Mic ON");
-//   } else {
-//     listening = false;
-//     recognition.abort();
-//     speechSynthesis.cancel();
-//     queue = [];
-//     speaking = false;
-//     console.log("🛑 Mic OFF");
-//   }
-// }
-
-// // ================= INIT =================
-// loadHistory();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// const chat = document.getElementById("chat");
-// const input = document.getElementById("command");
-
-// // ================= UNLOCK AUDIO =================
-// let audioUnlocked = false;
-
-// function unlockAudio() {
-//   if (audioUnlocked) return;
-//   speechSynthesis.resume();
-//   audioUnlocked = true;
-//   console.log("🔓 Audio unlocked");
-// }
-
-// ["click", "keydown", "touchstart"].forEach(evt => {
-//   document.addEventListener(evt, unlockAudio, { once: true });
-// });
-
-// // ================= CHAT HISTORY =================
-// async function loadHistory() {
-//   try {
-//     const res = await fetch("http://localhost:3000/history");
-//     const history = await res.json();
-
-//     chat.innerHTML = "";
-//     history.forEach(msg => {
-//       const div = document.createElement("div");
-//       div.style.marginBottom = "6px";
-//       div.innerText =
-//         (msg.role === "user" ? "You: " : "Arvsal: ") + msg.text;
-//       chat.appendChild(div);
-//     });
-
-//     chat.scrollTop = chat.scrollHeight;
-//   } catch {}
-// }
-
-// // ================= TEXT SPLIT (FIXED) =================
-// // Larger chunks → fewer pauses → faster speech
-// function splitText(text, max = 220) {
-//   const parts = [];
-//   let current = "";
-
-//   for (const word of text.split(" ")) {
-//     if ((current + word).length <= max) {
-//       current += word + " ";
-//     } else {
-//       parts.push(current.trim());
-//       current = word + " ";
-//     }
-//   }
-//   if (current.trim()) parts.push(current.trim());
-//   return parts;
-// }
-
-// // ================= BROWSER TTS =================
 // let speaking = false;
 // let queue = [];
-
-// // Preload voices (CRITICAL for Chrome)
+// let lastSpoken = "";
 // let voices = [];
+
 // speechSynthesis.onvoiceschanged = () => {
 //   voices = speechSynthesis.getVoices();
 // };
 
-// function speak(text) {
-//   if (!text) return;
-
-//   // 🚫 DO NOT cancel mid-sentence unless new reply
-//   speechSynthesis.cancel();
-
-//   // Stop mic while speaking (prevents self-trigger)
-//   if (recognition) {
-//     try { recognition.abort(); } catch {}
-//   }
-
-//   queue = splitText(text);
-//   speaking = true;
-
-//   speakNext();
-// }
-
-// function speakNext() {
-//   if (queue.length === 0) {
-//     speaking = false;
-//     // 🎙 Restart mic ONLY after speech fully ends
-//     if (listening) setTimeout(forceRestartMic, 800);
-//     return;
-//   }
-
-//   const utterance = new SpeechSynthesisUtterance(queue.shift());
-
-//   // 🎙 JARVIS-LIKE VOICE TUNING
-//   utterance.rate = 1.10;   // faster, natural
-//   utterance.pitch = 0.9;   // calm, mature
-//   utterance.volume = 1;
-
-//   // Prefer Google UK Male (Jarvis-like)
-//   const preferredVoice = voices.find(v =>
-//     v.name.includes("Google UK English Male")
-//   );
-//   if (preferredVoice) {
-//     utterance.voice = preferredVoice;
-//   }
-
-//   utterance.onend = speakNext;
-//   speechSynthesis.speak(utterance);
-// }
-
-// // ================= SEND COMMAND =================
-// async function sendCommand(textOverride) {
-//   const text = textOverride || input.value.trim();
-//   if (!text) return;
-
-//   input.value = "";
-
-//   try {
-//     const res = await fetch("http://localhost:3000/command", {
-//       method: "POST",
-//       headers: { "Content-Type": "application/json" },
-//       body: JSON.stringify({ command: text })
-//     });
-
-//     const data = await res.json();
-//     await loadHistory();
-
-//     if (data.reply) speak(data.reply);
-//   } catch (err) {
-//     console.error("Backend error", err);
-//   }
-// }
-
-// // ================= SPEECH RECOGNITION =================
-// const SpeechRecognition =
-//   window.SpeechRecognition || window.webkitSpeechRecognition;
-
-// let recognition;
-// let listening = false;
-// let micBusy = false;
-
-// if (SpeechRecognition) {
-//   recognition = new SpeechRecognition();
-//   recognition.lang = "en-US";
-//   recognition.interimResults = false;
-//   recognition.continuous = false;
-
-//   recognition.onresult = (event) => {
-//     const text = event.results[0][0].transcript.trim();
-//     if (!text) return;
-//     micBusy = true;
-//     sendCommand(text);
-//   };
-
-//   recognition.onerror = () => {
-//     micBusy = false;
-//     if (listening && !speaking) {
-//       setTimeout(forceRestartMic, 800);
-//     }
-//   };
-
-//   recognition.onend = () => {
-//     micBusy = false;
-//     if (listening && !speaking) {
-//       setTimeout(forceRestartMic, 800);
-//     }
-//   };
-// }
-
-// // ================= MIC CONTROL =================
-// function forceRestartMic() {
-//   if (!listening || micBusy || speaking) return;
-//   try {
-//     recognition.start();
-//     console.log("🎙 Mic restarted");
-//   } catch {}
-// }
-
-// function toggleMic() {
-//   if (!recognition) {
-//     alert("Speech recognition not supported");
-//     return;
-//   }
-
-//   if (!listening) {
-//     listening = true;
-//     forceRestartMic();
-//     console.log("🎙 Mic ON");
-//   } else {
-//     listening = false;
-//     recognition.abort();
-//     speechSynthesis.cancel();
-//     queue = [];
-//     speaking = false;
-//     console.log("🛑 Mic OFF");
-//   }
-// }
-
-// // ================= INIT =================
-// loadHistory();
-
-
-
-
-
-
-
-
-
-// const chat = document.getElementById("chat");
-// const input = document.getElementById("command");
-
-// // ================= UNLOCK AUDIO =================
-// let audioUnlocked = false;
-
-// function unlockAudio() {
-//   if (audioUnlocked) return;
-//   speechSynthesis.resume();
-//   audioUnlocked = true;
-//   console.log("🔓 Audio unlocked");
-// }
-
-// // Unlock on ANY user interaction
-// ["click", "keydown", "touchstart"].forEach(evt => {
-//   document.addEventListener(evt, unlockAudio, { once: true });
-// });
-
-
-// // ================= CHAT HISTORY =================
-// async function loadHistory() {
-//   try {
-//     const res = await fetch("http://localhost:3000/history");
-//     const history = await res.json();
-
-//     chat.innerHTML = "";
-//     history.forEach(msg => {
-//       const div = document.createElement("div");
-//       div.style.marginBottom = "6px";
-//       div.innerText =
-//         (msg.role === "user" ? "You: " : "Arvsal: ") + msg.text;
-//       chat.appendChild(div);
-//     });
-
-//     chat.scrollTop = chat.scrollHeight;
-//   } catch {}
-// }
-
-// // ================= TEXT SPLIT (CRITICAL) =================
-// function splitText(text, max = 140) {
+// function splitText(text, max = 220) {
 //   const parts = [];
 //   let current = "";
-
 //   for (const word of text.split(" ")) {
-//     if ((current + word).length < max) {
-//       current += word + " ";
-//     } else {
+//     if ((current + word).length <= max) current += word + " ";
+//     else {
 //       parts.push(current.trim());
 //       current = word + " ";
 //     }
@@ -658,74 +289,41 @@ loadHistory(); // ONLY once
 //   return parts;
 // }
 
-// // ================= BROWSER TTS =================
-// let speaking = false;
-// let queue = [];
-
 // function speak(text) {
-//   if (!text) return;
-//   speechSynthesis.resume();
-
-//   // Stop mic
-//   if (recognition) {
-//     try { recognition.abort(); } catch {}
-//   }
+//   if (!text || text === lastSpoken) return;
+//   lastSpoken = text;
 
 //   speechSynthesis.cancel();
 //   queue = splitText(text);
 //   speaking = true;
-
 //   speakNext();
 // }
 
 // function speakNext() {
-//   if (queue.length === 0) {
+//   if (!queue.length) {
 //     speaking = false;
-//     if (listening) setTimeout(forceRestartMic, 400);
 //     return;
 //   }
 
-//   const utterance = new SpeechSynthesisUtterance(queue.shift());
+//   const u = new SpeechSynthesisUtterance(queue.shift());
+//   u.rate = 1.1;
+//   u.pitch = 0.9;
 
-//   // 🔴 DO NOT SET utterance.voice
-//   utterance.rate = 1;
-//   utterance.pitch = 1;
-//   utterance.volume = 1;
+//   const v = voices.find(v => v.name.includes("Google UK English Male"));
+//   if (v) u.voice = v;
 
-//   utterance.onend = speakNext;
-//   speechSynthesis.speak(utterance);
+//   u.onend = speakNext;
+//   speechSynthesis.speak(u);
 // }
 
-// // ================= SEND COMMAND =================
-// async function sendCommand(textOverride) {
-//   const text = textOverride || input.value.trim();
-//   if (!text) return;
+// /* ================= SPEECH RECOGNITION ================= */
 
-//   input.value = "";
-
-//   try {
-//     const res = await fetch("http://localhost:3000/command", {
-//       method: "POST",
-//       headers: { "Content-Type": "application/json" },
-//       body: JSON.stringify({ command: text })
-//     });
-
-//     const data = await res.json();
-//     await loadHistory();
-
-//     if (data.reply) speak(data.reply);
-//   } catch (err) {
-//     console.error("Backend error", err);
-//   }
-// }
-
-// // ================= SPEECH RECOGNITION =================
 // const SpeechRecognition =
 //   window.SpeechRecognition || window.webkitSpeechRecognition;
 
 // let recognition;
-// let listening = false;
 // let micBusy = false;
+// let listening = false;
 
 // if (SpeechRecognition) {
 //   recognition = new SpeechRecognition();
@@ -733,70 +331,43 @@ loadHistory(); // ONLY once
 //   recognition.interimResults = false;
 //   recognition.continuous = false;
 
-//   recognition.onresult = (event) => {
-//     const text = event.results[0][0].transcript.trim();
-//     if (!text) return;
-//     micBusy = true;
-//     sendCommand(text);
-//   };
-
-//   recognition.onerror = () => {
+//   recognition.onresult = e => {
 //     micBusy = false;
-//     if (listening) setTimeout(forceRestartMic, 400);
+//     sendCommand(e.results[0][0].transcript.trim());
 //   };
 
 //   recognition.onend = () => {
 //     micBusy = false;
-//     if (listening && !speaking) {
-//       setTimeout(forceRestartMic, 400);
-//     }
+//     if (listening && !speaking) startMic();
 //   };
 // }
 
-// // ================= MIC CONTROL =================
-// function forceRestartMic() {
-//   if (!listening || micBusy || speaking) return;
+// function startMic() {
+//   if (micBusy || speaking) return;
 //   try {
-//     recognition.abort();
+//     micBusy = true;
 //     recognition.start();
-//     console.log("🎙 Mic restarted");
 //   } catch {}
 // }
 
 // function toggleMic() {
-//   if (!recognition) {
-//     alert("Speech recognition not supported");
-//     return;
-//   }
+//   if (!recognition) return alert("Speech recognition not supported");
 
-//   if (!listening) {
-//     listening = true;
-//     forceRestartMic();
-//     console.log("🎙 Mic ON");
-//   } else {
-//     listening = false;
-//     recognition.abort();
+//   listening = !listening;
+
+//   if (listening) startMic();
+//   else {
+//     micBusy = false;
 //     speechSynthesis.cancel();
 //     queue = [];
 //     speaking = false;
-//     console.log("🛑 Mic OFF");
+//     try { recognition.abort(); } catch {}
 //   }
 // }
 
-// // ================= INIT =================
-// loadHistory();
+// /* ================= INIT ================= */
 
-
-
-
-
-
-
-
-
-
-
-
+// loadHistory(); // ONLY once
 
 
 

@@ -23,10 +23,7 @@ const SYSTEM_INTENTS = new Set([
   "LOCK",
   "VOLUME_UP",
   "VOLUME_DOWN",
-  "MUTE",
-  "PLAY_PAUSE",
-  "NEXT_TRACK",
-  "PREV_TRACK"
+  "MUTE"
 ]);
 
 /* ================= INTENT CLASS ================= */
@@ -34,11 +31,9 @@ const SYSTEM_INTENTS = new Set([
 function intentClass(intent) {
   if (!intent) return "conversation";
   if (SYSTEM_INTENTS.has(intent)) return "system";
-
   if (intent === "REMEMBER") return "write";
   if (intent === "RECALL") return "read";
   if (intent === "FORGET") return "forget";
-
   return "conversation";
 }
 
@@ -46,10 +41,10 @@ function intentClass(intent) {
 
 function setContext(data = {}) {
   if (!data || typeof data !== "object") return;
-  if (!data.intent) return;
 
   const now = Date.now();
-  const incomingClass = intentClass(data.intent);
+  const incomingIntent = data.intent || null;
+  const incomingClass = intentClass(incomingIntent);
 
   // 🚫 System intents never touch context
   if (incomingClass === "system") return;
@@ -75,6 +70,7 @@ function setContext(data = {}) {
   // Reset on intent-class change (except read ↔ write)
   if (
     context.intentClass &&
+    incomingClass &&
     incomingClass !== context.intentClass &&
     !(
       (incomingClass === "read" && context.intentClass === "write") ||
@@ -108,8 +104,11 @@ function setContext(data = {}) {
     context.key = data.key.toLowerCase();
   }
 
-  context.intent = data.intent;
-  context.intentClass = incomingClass;
+  if (incomingIntent) {
+    context.intent = incomingIntent;
+    context.intentClass = incomingClass;
+  }
+
   context.timestamp = now;
 }
 
@@ -124,7 +123,7 @@ function getContext({ use = true } = {}) {
     return null;
   }
 
-  // 🔒 Gentle decay (only on real usage)
+  // 🔒 Gentle decay ONLY on explicit conversational usage
   if (use === true) {
     context.confidence = Math.max(0, context.confidence - 0.1);
   }
@@ -149,17 +148,30 @@ function peekContext() {
   return context ? { ...context } : null;
 }
 
+
+let confirmation = null;
+
+function setConfirmation(data) {
+  confirmation = data;
+}
+
+function getConfirmation() {
+  return confirmation;
+}
+
+function clearConfirmation() {
+  confirmation = null;
+}
+
 module.exports = {
   setContext,
   getContext,
   clearContext,
-  peekContext
+  peekContext,
+  setConfirmation,
+  getConfirmation,
+  clearConfirmation,
 };
-
-
-
-
-
 
 
 
@@ -180,6 +192,7 @@ module.exports = {
 //  * Short-term conversational reference memory.
 //  * NOT factual memory.
 //  * NOT episodic memory.
+//  * Deterministic and decay-safe.
 //  */
 
 // let context = null;
@@ -209,22 +222,33 @@ module.exports = {
 // function intentClass(intent) {
 //   if (!intent) return "conversation";
 //   if (SYSTEM_INTENTS.has(intent)) return "system";
-//   if (intent === "REMEMBER") return "memory";
-//   if (intent === "RECALL") return "memory"; // 🔒 SAME CLASS
+
+//   if (intent === "REMEMBER") return "write";
+//   if (intent === "RECALL") return "read";
+//   if (intent === "FORGET") return "forget";
+
 //   return "conversation";
 // }
 
 // /* ================= SET CONTEXT ================= */
 
 // function setContext(data = {}) {
-//   if (typeof data !== "object" || data === null) return;
+//   if (!data || typeof data !== "object") return;
+//   if (!data.intent) return;
 
 //   const now = Date.now();
+//   const incomingClass = intentClass(data.intent);
 
-//   // Ignore system intents
-//   if (SYSTEM_INTENTS.has(data.intent)) return;
+//   // 🚫 System intents never touch context
+//   if (incomingClass === "system") return;
 
-//   // Initialize or reset expired context
+//   // 🔥 FORGET is a hard boundary
+//   if (incomingClass === "forget") {
+//     context = null;
+//     return;
+//   }
+
+//   // Init or expire
 //   if (!context || now - context.timestamp > CONTEXT_TTL) {
 //     context = {
 //       subject: null,
@@ -236,16 +260,23 @@ module.exports = {
 //     };
 //   }
 
-//   const incomingClass = intentClass(data.intent);
-
-//   // Reset only if switching to SYSTEM
+//   // Reset on intent-class change (except read ↔ write)
 //   if (
 //     context.intentClass &&
 //     incomingClass !== context.intentClass &&
-//     incomingClass === "system"
+//     !(
+//       (incomingClass === "read" && context.intentClass === "write") ||
+//       (incomingClass === "write" && context.intentClass === "read")
+//     )
 //   ) {
-//     context = null;
-//     return;
+//     context = {
+//       subject: null,
+//       key: null,
+//       intent: null,
+//       intentClass: null,
+//       confidence: 1,
+//       timestamp: now
+//     };
 //   }
 
 //   // Subject change clears key
@@ -265,11 +296,8 @@ module.exports = {
 //     context.key = data.key.toLowerCase();
 //   }
 
-//   if (data.intent) {
-//     context.intent = data.intent;
-//     context.intentClass = incomingClass;
-//   }
-
+//   context.intent = data.intent;
+//   context.intentClass = incomingClass;
 //   context.timestamp = now;
 // }
 
@@ -284,12 +312,12 @@ module.exports = {
 //     return null;
 //   }
 
-//   // 🔒 Meta queries must not decay context
+//   // 🔒 Gentle decay (only on real usage)
 //   if (use === true) {
-//     context.confidence = Math.max(0, context.confidence - 0.15);
+//     context.confidence = Math.max(0, context.confidence - 0.1);
 //   }
 
-//   if (context.confidence < 0.3) {
+//   if (context.confidence < 0.35) {
 //     context = null;
 //     return null;
 //   }
@@ -324,165 +352,5 @@ module.exports = {
 
 
 
-// let context = null;
-
-// const CONTEXT_TTL = 2 * 60 * 1000; // 2 minutes
-
-// // Intents that must NEVER create conversational context
-// const SYSTEM_INTENTS = new Set([
-//   "LOCAL_SKILL",
-//   "OPEN_APP",
-//   "OPEN_FOLDER",
-//   "OPEN_CALENDAR",
-//   "SHUTDOWN",
-//   "RESTART",
-//   "SLEEP",
-//   "LOCK",
-//   "VOLUME_UP",
-//   "VOLUME_DOWN",
-//   "MUTE",
-//   "PLAY_PAUSE",
-//   "NEXT_TRACK",
-//   "PREV_TRACK"
-// ]);
-
-// // Intent classes (coarse groups)
-// function intentClass(intent) {
-//   if (!intent) return "unknown";
-//   if (SYSTEM_INTENTS.has(intent)) return "system";
-//   if (intent === "REMEMBER" || intent === "MEMORY_SUMMARY") return "memory";
-//   if (intent === "RECALL") return "recall";
-//   return "conversation";
-// }
-
-// /**
-//  * Set or update conversational context safely
-//  */
-// function setContext(data = {}) {
-//   if (typeof data !== "object" || data === null) return;
-
-//   // ❌ Ignore system-level context completely
-//   if (data.intent && SYSTEM_INTENTS.has(data.intent)) return;
-
-//   const now = Date.now();
-
-//   // Initialize or reset expired context
-//   if (!context || now - context.timestamp > CONTEXT_TTL) {
-//     context = {
-//       subject: null,
-//       key: null,
-//       topic: null,
-//       intent: null,
-//       intentClass: null,
-//       reason: null,
-//       confidence: 1,
-//       timestamp: now
-//     };
-//   }
-
-//   // 🔁 Reset if intent class changes fundamentally
-//   if (
-//     typeof data.intent === "string" &&
-//     context.intentClass &&
-//     intentClass(data.intent) !== context.intentClass
-//   ) {
-//     context = {
-//       subject: null,
-//       key: null,
-//       topic: null,
-//       intent: data.intent,
-//       intentClass: intentClass(data.intent),
-//       reason: data.reason || null,
-//       confidence: 1,
-//       timestamp: now
-//     };
-//     return;
-//   }
-
-//   // 🔄 Subject change → clear topic
-//   if (
-//     typeof data.subject === "string" &&
-//     context.subject &&
-//     data.subject.toLowerCase() !== context.subject
-//   ) {
-//     context.topic = null;
-//   }
-
-//   // Selective safe updates
-//   if (typeof data.subject === "string" && data.subject.trim()) {
-//     context.subject = data.subject.toLowerCase();
-//   }
-
-//   if (typeof data.key === "string" && data.key.trim()) {
-//     context.key = data.key.toLowerCase();
-//   }
-
-//   if (typeof data.topic === "string" && data.topic.trim()) {
-//     context.topic = data.topic.toLowerCase();
-//   }
-
-//   if (typeof data.intent === "string") {
-//     context.intent = data.intent;
-//     context.intentClass = intentClass(data.intent);
-//   }
-
-//   if (typeof data.reason === "string") {
-//     context.reason = data.reason;
-//   }
-
-//   if (typeof data.confidence === "number") {
-//     context.confidence = Math.max(0, Math.min(1, data.confidence));
-//   }
-
-//   context.timestamp = now;
-// }
-
-// /**
-//  * Get valid context (confidence-aware)
-//  * `use = true` means context is actually consumed
-//  */
-// function getContext({ use = true } = {}) {
-//   if (!context) return null;
-
-//   // ⏳ Expired
-//   if (Date.now() - context.timestamp > CONTEXT_TTL) {
-//     context = null;
-//     return null;
-//   }
-
-//   // 🧠 Decay ONLY when actually used
-//   if (use) {
-//     context.confidence = Math.max(0, context.confidence - 0.05);
-//   }
-
-//   // 🔒 Too weak → discard
-//   if (context.confidence < 0.4) {
-//     context = null;
-//     return null;
-//   }
-
-//   return { ...context };
-// }
-
-// /**
-//  * Clear context manually
-//  */
-// function clearContext() {
-//   context = null;
-// }
-
-// /**
-//  * Debug helper (safe)
-//  */
-// function peekContext() {
-//   return context ? { ...context } : null;
-// }
-
-// module.exports = {
-//   setContext,
-//   getContext,
-//   clearContext,
-//   peekContext
-// };
 
 

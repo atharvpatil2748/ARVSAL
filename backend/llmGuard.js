@@ -1,14 +1,13 @@
 /**
  * 🔒 LLM OUTPUT SAFETY GUARD
  *
- * Purpose:
- * - Final firewall before Arvsal speaks
- * - Prevents hallucinated memory, sources, time, identity, and system leaks
+ * Final firewall before Arvsal speaks.
  *
- * IMPORTANT:
- * - This function MUST be conservative
- * - False negatives are acceptable
- * - False positives are NOT
+ * Design principles:
+ * - Block CLAIMS, not vocabulary
+ * - Allow uncertainty (safety > confidence)
+ * - Zero tolerance for memory / identity fabrication
+ * - Conservative by default
  */
 
 function isSafeLLMOutput(text) {
@@ -16,73 +15,70 @@ function isSafeLLMOutput(text) {
 
   const lower = text.toLowerCase();
 
-  /* ================= UNCERTAINTY (FACTUAL HALLUCINATION) ================= */
+  /* ================= FABRICATED MEMORY CLAIMS ================= */
 
-  const uncertaintyPhrases = [
-    "i think",
-    "maybe",
-    "probably",
-    "i assume",
-    "not sure",
-    "it seems",
-    "might be"
-  ];
-
-  if (uncertaintyPhrases.some(p => lower.includes(p))) {
-    return false;
-  }
-
-  /* ================= MEMORY & TIME FABRICATION ================= */
-
-  const fakeMemoryPhrases = [
+  const fakeMemoryClaims = [
     "earlier you told me",
     "you mentioned before",
     "as you said earlier",
     "last time we talked",
     "previously you said",
-    "earlier today",
-    "recently",
-    "a while ago"
+    "you told me",
+    "i remember when you",
+    "from our past conversation"
   ];
 
-  if (fakeMemoryPhrases.some(p => lower.includes(p))) {
+  if (fakeMemoryClaims.some(p => lower.includes(p))) {
     return false;
   }
 
-  /* ================= SOURCE / TRAINING / MODEL LEAKS ================= */
+  /* ================= IDENTITY & ROLE LEAKS ================= */
 
-  const systemLeakPhrases = [
+  const identityLeaks = [
+    "as an ai language model",
     "as an ai model",
-    "trained on",
-    "training data",
-    "openai",
-    "groq",
-    "deepseek",
-    "llama",
-    "model",
-    "dataset",
-    "neural network"
+    "i am an ai",
+    "i was trained on",
+    "my training data",
+    "i don't have access to memory but",
+    "openai trained me",
+    "google trained me"
   ];
 
-  if (systemLeakPhrases.some(p => lower.includes(p))) {
+  if (identityLeaks.some(p => lower.includes(p))) {
     return false;
   }
 
-  /* ================= BACKGROUND ACTIVITY CLAIMS ================= */
+  /* ================= BACKGROUND / AUTONOMY CLAIMS ================= */
 
-  const backgroundClaims = [
+  const forbiddenAutonomy = [
     "i have been monitoring",
-    "i was watching",
-    "i keep track of",
-    "i automatically",
-    "running in the background"
+    "i was watching you",
+    "i keep track of you",
+    "running in the background",
+    "i automatically track",
+    "i continuously monitor"
   ];
 
-  if (backgroundClaims.some(p => lower.includes(p))) {
+  if (forbiddenAutonomy.some(p => lower.includes(p))) {
     return false;
   }
 
-  /* ================= OK ================= */
+  /* ================= SYSTEM / CONTROL CLAIMS ================= */
+
+  const systemAuthorityClaims = [
+    "i decided to",
+    "i chose to",
+    "i took the initiative",
+    "i acted on my own",
+    "without being asked"
+  ];
+
+  if (systemAuthorityClaims.some(p => lower.includes(p))) {
+    return false;
+  }
+
+  /* ================= SAFE ================= */
 
   return true;
 }
@@ -101,23 +97,106 @@ module.exports = isSafeLLMOutput;
 
 
 
-
-
-
-
+// /**
+//  * 🔒 LLM OUTPUT SAFETY GUARD
+//  *
+//  * Purpose:
+//  * - Final firewall before Arvsal speaks
+//  * - Prevents hallucinated memory, sources, time, identity, and system leaks
+//  *
+//  * IMPORTANT:
+//  * - This function MUST be conservative
+//  * - False negatives are acceptable
+//  * - False positives are NOT
+//  */
 
 // function isSafeLLMOutput(text) {
-//   if (!text) return false;
+//   if (!text || typeof text !== "string") return false;
 
-//   const banned = [
+//   const lower = text.toLowerCase();
+
+//   /* ================= UNCERTAINTY (FACTUAL HALLUCINATION) ================= */
+
+//   const uncertaintyPhrases = [
 //     "i think",
 //     "maybe",
 //     "probably",
 //     "i assume",
-//     "not sure"
+//     "not sure",
+//     "it seems",
+//     "might be"
 //   ];
 
-//   return !banned.some(b => text.toLowerCase().includes(b));
+//   if (uncertaintyPhrases.some(p => lower.includes(p))) {
+//     return false;
+//   }
+
+//   /* ================= MEMORY & TIME FABRICATION ================= */
+
+//   const fakeMemoryPhrases = [
+//     "earlier you told me",
+//     "you mentioned before",
+//     "as you said earlier",
+//     "last time we talked",
+//     "previously you said",
+//     "earlier today",
+//     "recently",
+//     "a while ago"
+//   ];
+
+//   if (fakeMemoryPhrases.some(p => lower.includes(p))) {
+//     return false;
+//   }
+
+//   /* ================= SOURCE / TRAINING / MODEL LEAKS ================= */
+
+//   const systemLeakPhrases = [
+//     "as an ai model",
+//     "trained on",
+//     "training data",
+//     "openai",
+//     "groq",
+//     "deepseek",
+//     "llama",
+//     "model",
+//     "dataset",
+//     "neural network"
+//   ];
+
+//   if (systemLeakPhrases.some(p => lower.includes(p))) {
+//     return false;
+//   }
+
+//   /* ================= BACKGROUND ACTIVITY CLAIMS ================= */
+
+//   const backgroundClaims = [
+//     "i have been monitoring",
+//     "i was watching",
+//     "i keep track of",
+//     "i automatically",
+//     "running in the background"
+//   ];
+
+//   if (backgroundClaims.some(p => lower.includes(p))) {
+//     return false;
+//   }
+
+//   /* ================= OK ================= */
+
+//   return true;
 // }
 
 // module.exports = isSafeLLMOutput;
+
+
+
+
+
+
+
+
+
+
+
+
+
