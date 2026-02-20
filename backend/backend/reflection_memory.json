@@ -1,0 +1,50 @@
+[
+  {
+    "id": "1770145007425-gthsky",
+    "subject": "user",
+    "insight": "Repeated patterns detected related to favourite food.",
+    "confidence": 0.7166666666666668,
+    "relatedKeys": [
+      "favourite food"
+    ],
+    "source": "reflection-engine",
+    "createdAt": 1770145007425,
+    "lastUpdated": 1770145007425
+  },
+  {
+    "id": "1770145007426-epobyn",
+    "subject": "user",
+    "insight": "User consistently revisits similar topics over time.",
+    "confidence": 0.7031729166666667,
+    "relatedKeys": [
+      "favourite food"
+    ],
+    "source": "reflection-engine-detail",
+    "createdAt": 1770145007427,
+    "lastUpdated": 1771094866451
+  },
+  {
+    "id": "1770358251895-bsoisj",
+    "subject": "user",
+    "insight": "Repeated patterns detected related to remember name.",
+    "confidence": 0.7083333333333335,
+    "relatedKeys": [
+      "remember name"
+    ],
+    "source": "reflection-engine",
+    "createdAt": 1770358251895,
+    "lastUpdated": 1770358251895
+  },
+  {
+    "id": "1771094334226-c6v8y2",
+    "subject": "user",
+    "insight": "Repeated patterns detected related to self_improvement.",
+    "confidence": 0.6854999999999998,
+    "relatedKeys": [
+      "self_improvement"
+    ],
+    "source": "reflection-engine",
+    "createdAt": 1771094334226,
+    "lastUpdated": 1771094866447
+  }
+]
