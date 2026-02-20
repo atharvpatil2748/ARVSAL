@@ -25,6 +25,11 @@ function normalizeKey(key) {
   // normalize spaces (existing behavior)
   key = key.replace(/\s+/g, " ").trim();
 
+  // 🔒 Normalize American → British spelling
+key = key
+  .replace(/\bfavorite\b/g, "favourite")
+  .replace(/\bcolor\b/g, "colour");
+
   /* =====================================================
      🔒 FIX #3: normalize synonyms (existing logic preserved)
   ===================================================== */

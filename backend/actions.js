@@ -16,8 +16,8 @@ const { setContext, getContext, clearContext } = require("./contextMemory");
 const { introduceSelf } = require("./identity");
 const { resolveDateRange } = require("./dateResolver");
 const { recallByMeaning } = require("./recallRouter");
-const { embedText } = require("./embeddingModel");
-const { addVector } = require("./vectorStore");
+const llmRouter = require("./llmRouter");
+
 
 /* ================= UTIL ================= */
 
@@ -32,23 +32,46 @@ function formatDateTime(ts) {
 function resolveSubject(text = "") {
   const lower = text.toLowerCase();
 
+  // 🔥 Alias correction layer (speech-safe)
+  const NAME_ALIASES = {
+    sajal: "sejal",
+    sajol: "sejal",
+    segal: "sejal",
+    sahal: "sahil",
+    omkar: "omkar",
+    vandna: "vandana"
+  };
+
+  // Self references
   if (/\bmy\b/.test(lower)) return { subject: "user" };
   if (/\byour\b/.test(lower)) return { subject: "arvsal" };
 
-  const known = lower.match(
-    /\b(sejal|sahil|omkar|vandana|krishnath|vardhan|parth|pratham)\b/
-  );
-  if (known) return { subject: known[1] };
+  // Extract possible name token
+  const nameMatch = lower.match(/\b[a-z]{3,}\b/g);
+  if (nameMatch) {
+    for (let token of nameMatch) {
+      if (NAME_ALIASES[token]) {
+        return { subject: NAME_ALIASES[token] };
+      }
+
+      // Direct known names
+      if (["sejal","sahil","omkar","vandana","krishnath","vardhan","parth","pratham"].includes(token)) {
+        return { subject: token };
+      }
+    }
+  }
 
   return { subject: "user" };
 }
-
 /* ================= KEY ================= */
 
 function cleanKey(rawKey, subject) {
   if (!rawKey) return null;
 
   rawKey = rawKey.toLowerCase().trim();
+
+  // 🔥 Remove accidental "remember" prefix
+  rawKey = rawKey.replace(/^remember\s+/, "");
 
   if (rawKey === "identity") return "identity";
   if (rawKey === subject) return "relationship";
@@ -100,6 +123,30 @@ function phraseFromConfidence(fact, subject, key) {
   } ${key} is ${fact.value}.`;
 }
 
+async function summarizeEpisodes(entries) {
+
+  if (!entries || !entries.length) {
+    return "I don’t have anything stored for that period.";
+  }
+
+  const content = entries
+    .filter(e => e.source === "user")
+    .map(e => e.value)
+    .join("\n");
+
+  if (!content.trim()) {
+    return "I don’t have meaningful conversation stored for that period.";
+  }
+
+  const summary = await llmRouter({
+  intent: "EPISODIC_SUMMARY",
+  text: content,
+  modelOverride: "qwen2:7b"
+});
+
+  return summary || "I don’t have anything meaningful stored for that period.";
+}
+
 /* ================= MAIN ================= */
 
 async function handleIntent(intentObj) {
@@ -137,18 +184,6 @@ async function handleIntent(intentObj) {
         source: "user"
       });
 
-      try {
-        const embedding = await embedText(`${key}: ${value}`);
-        if (Array.isArray(embedding)) {
-          addVector({
-            text: `${key}: ${value}`,
-            subject,
-            importance: 1,
-            embedding
-          });
-        }
-      } catch {}
-
       setContext({ subject, key });
       return formatResponse(subject, key, value);
     }
@@ -178,7 +213,24 @@ async function handleIntent(intentObj) {
       }
 
       /* ---------- SEMANTIC MEMORY ---------- */
-      const fact = memory.recall(subject, key);
+      let fact = memory.recall(subject, key);
+
+      /* ---------- FUZZY KEY MATCH ---------- */
+      if (!fact) {
+        const allFacts = memory.summarize(subject);
+
+        const normalizedKey = key.toLowerCase();
+
+        const candidate = allFacts.find(f =>
+          f.key.includes(normalizedKey) ||
+          normalizedKey.includes(f.key)
+        );
+
+        if (candidate) {
+          fact = candidate;
+          key = candidate.key;
+        }
+      }
 
       /* ---------- META MEMORY (HOW / WHEN) ---------- */
       if (fact && intentObj.meta === true) {
@@ -200,7 +252,7 @@ async function handleIntent(intentObj) {
       }
 
       /* ---------- NORMAL SEMANTIC RECALL ---------- */
-      if (fact) {
+      if (fact && typeof fact.value === "string") {
         setContext({ subject, key });
         return phraseFromConfidence(fact, subject, key);
       }
@@ -211,15 +263,28 @@ async function handleIntent(intentObj) {
       }
 
       /* ---------- VECTOR FALLBACK (MEANING-BASED) ---------- */
-      const vectorQuery =
-        key && subject
-          ? `${subject} ${key}`
-          : intentObj.rawText;
+      let vectorQuery = intentObj.rawText;
 
-      const vectorResults = await recallByMeaning(
-        vectorQuery,
-        subject
-      );
+      if (key && subject) {
+        vectorQuery = `${subject} ${key}`;
+      } else if (key) {
+        vectorQuery = key;
+      }
+
+      // 🔒 Only allow vector fallback if this was NOT a direct factual query
+      const directKeyQuery =
+        intentObj.rawText.toLowerCase().startsWith("what is my") ||
+        intentObj.rawText.toLowerCase().startsWith("who is") ||
+        intentObj.rawText.toLowerCase().startsWith("what is");
+
+      let vectorResults = null;
+
+      if (!directKeyQuery) {
+        vectorResults = await recallByMeaning(
+          vectorQuery,
+          subject
+        );
+      }
 
       if (Array.isArray(vectorResults) && vectorResults.length) {
         // Loose context for follow-ups like "tell me more"
@@ -300,18 +365,30 @@ async function handleIntent(intentObj) {
     case "DAY_RECALL":
     case "EPISODIC_RECALL":
     case "EPISODIC_BY_DATE": {
-      const range = resolveDateRange(intentObj.rawText || "today");
+      const range = resolveDateRange(intentObj.rawText);
+
       if (!range || !range.start || !range.end) {
         return "I couldn't determine the time range you're asking about.";
       }
+
       const entries = episodicMemory.getByDateRange(
         range.start.getTime(),
         range.end.getTime()
       );
 
-      return entries.length
-        ? entries.map(e => `• ${e.value}`).join("\n")
-        : "I don’t have anything stored for that time.";
+      return summarizeEpisodes(entries);
+    }
+
+    case "EPISODIC_RECALL": {
+      const entries = episodicMemory.getRecent(50);
+      return summarizeEpisodes(entries);
+    }
+
+    case "SESSION_RECALL": {
+      const todaySession = episodicMemory.getRecent(200)
+        .filter(e => e.sessionId === episodicMemory.SESSION_ID);
+
+      return summarizeEpisodes(todaySession);
     }
 
     /* ===== LOCAL SKILLS ===== */
@@ -344,330 +421,6 @@ module.exports = {
   resolveSubject
 };
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// const memory = require("./memory");
-// const episodicMemory = require("./episodicMemory");
-// const normalizeKey = require("./keyNormalizer");
-// const { exec } = require("child_process");
-// const { setContext, getContext, clearContext } = require("./contextMemory");
-// const { introduceSelf } = require("./identity");
-// const { resolveDateRange } = require("./dateResolver");
-
-// /* ================= UTIL ================= */
-
-// function formatDateTime(ts) {
-//   if (!ts) return "an unknown time";
-//   const d = new Date(ts);
-//   return `${d.toDateString()} at ${d.toLocaleTimeString()}`;
-// }
-
-// /* ================= SUBJECT ================= */
-
-// function resolveSubject(text = "") {
-//   text = text.toLowerCase();
-
-//   if (/\bmy\b/.test(text)) return { subject: "user" };
-//   if (/\byour\b/.test(text)) return { subject: "arvsal" };
-
-//   const known = text.match(
-//     /\b(sejal|sahil|omkar|vandana|krishnath|vardhan|parth|pratham)\b/
-//   );
-//   if (known) return { subject: known[1] };
-
-//   const match = text.match(/^([a-z][a-z\s]{1,20})\s+is\s+/i);
-//   if (match) {
-//     const candidate = match[1].trim();
-//     const forbidden = new Set([
-//       "this", "that", "he", "she", "they",
-//       "friend", "person", "someone", "anyone"
-//     ]);
-//     if (!forbidden.has(candidate)) {
-//       return { subject: candidate };
-//     }
-//   }
-
-//   return { subject: "user" };
-// }
-
-// /* ================= KEY ================= */
-
-// function cleanKey(rawKey, subject) {
-//   if (!rawKey) return null;
-
-//   rawKey = rawKey.toLowerCase().trim();
-
-//   if (rawKey === subject) return "relationship";
-//   if (rawKey === "identity") return "identity";
-
-//   let key = normalizeKey(rawKey);
-//   if (!key) return null;
-
-//   key = key
-//     .replace(new RegExp(`^${subject}\\s+`, "i"), "")
-//     .replace(new RegExp(`^${subject}'?s\\s+`, "i"), "")
-//     .trim();
-
-//   return key || null;
-// }
-
-// /* ================= RESPONSE ================= */
-
-// function formatResponse(subject, key, value) {
-//   if (key === "relationship") return `${subject} is ${value}.`;
-//   if (subject === "user") return `Your ${key} is ${value}.`;
-//   if (subject === "arvsal") return `My ${key} is ${value}.`;
-//   return `${subject}'s ${key} is ${value}.`;
-// }
-
-// /* ================= CONFIDENCE ================= */
-
-// function phraseFromConfidence(fact, subject, key) {
-//   if (fact.confidence >= 0.9) {
-//     return formatResponse(subject, key, fact.value);
-//   }
-//   if (fact.confidence >= 0.75) {
-//     return `You once told me that ${
-//       subject === "user" ? "your" : subject + "'s"
-//     } ${key} is ${fact.value}.`;
-//   }
-//   return `As far as I remember, ${
-//     subject === "user" ? "your" : subject + "'s"
-//   } ${key} is ${fact.value}.`;
-// }
-
-// /* ================= MAIN ================= */
-
-// async function handleIntent(intentObj) {
-//   if (!intentObj?.intent) return "I didn't understand that.";
-
-//   switch (intentObj.intent) {
-
-//     case "INTRODUCE_SELF":
-//       return introduceSelf();
-
-//     /* ===== REMEMBER ===== */
-//     case "REMEMBER": {
-//       const { subject } = resolveSubject(intentObj.rawText);
-//       const key = cleanKey(intentObj.key, subject);
-//       if (!key || !intentObj.value) return "What should I remember?";
-
-//       let value = intentObj.value.trim();
-//       value = value.replace(/^(my|your)\s+/i, "").trim();
-
-//       memory.remember({
-//         subject,
-//         key,
-//         value,
-//         source: "explicit",
-//         confidence: 1,
-//         category: key === "identity" || key === "relationship"
-//           ? "identity"
-//           : "general"
-//       });
-
-//       episodicMemory.store({
-//         type: "explicit_memory",
-//         subject,
-//         key,
-//         value,
-//         source: "user"
-//       });
-
-//       setContext({ subject, key, intent: "REMEMBER" });
-//       return formatResponse(subject, key, value);
-//     }
-
-//     /* ===== RECALL ===== */
-//     case "RECALL": {
-//       let subject, key;
-//       const isMeta = intentObj.meta === true;
-
-//       if (intentObj.key === "it") {
-//         const ctx = getContext({ use: !isMeta });
-//         if (ctx) {
-//           subject = ctx.subject;
-//           key = ctx.key;
-//         }
-//       }
-
-//       if (!subject) {
-//         ({ subject } = resolveSubject(intentObj.rawText));
-//         key = cleanKey(intentObj.key, subject);
-//       }
-
-//       if (!key) return "I’m not sure what you’re asking.";
-
-//       const fact = memory.recall(subject, key);
-//       if (!fact) return "I don't have this stored as memory.";
-
-//       setContext({ subject, key, intent: "RECALL" });
-
-//       const episode = episodicMemory.findLastExplicit(subject, key);
-
-//       if (/how do you (know|remember)/i.test(intentObj.rawText)) {
-//         return "You told me this directly, and I stored it as explicit memory.";
-//       }
-
-//       if (/when did i (tell|say)/i.test(intentObj.rawText)) {
-//         return episode
-//           ? `You told me this on ${formatDateTime(episode.timestamp)}.`
-//           : "I don’t recall exactly when you told me this.";
-//       }
-
-//       return phraseFromConfidence(fact, subject, key);
-//     }
-
-//     /* ===== FORGET ===== */
-//     case "FORGET": {
-//       let subject, key;
-
-//       if (intentObj.key === "it") {
-//         const ctx = getContext({ use: false });
-//         if (!ctx) return "I’m not sure what to forget.";
-//         subject = ctx.subject;
-//         key = ctx.key;
-//       } else {
-//         ({ subject } = resolveSubject(intentObj.rawText));
-//         key = cleanKey(intentObj.key, subject);
-//       }
-
-//       if (!key) return "I’m not sure what to forget.";
-
-//       const removed = memory.forgetFact(subject, key);
-//       clearContext();
-
-//       if (!removed) {
-//         return `I don’t have ${
-//           subject === "user" ? "your" : subject + "'s"
-//         } ${key} stored as memory.`;
-//       }
-
-//       episodicMemory.store({
-//         type: "forget",
-//         subject,
-//         key,
-//         source: "user"
-//       });
-
-//       return `Alright. I’ve forgotten ${
-//         subject === "user" ? "your" : subject + "'s"
-//       } ${key}.`;
-//     }
-
-//     /* ===== DAY RECALL ===== */
-//     case "DAY_RECALL": {
-//       const range = resolveDateRange("today");
-//       let entries = episodicMemory.getByDateRange(
-//         range.start.getTime(),
-//         range.end.getTime()
-//       );
-
-//       if (!entries.length) {
-//         return "I don’t have anything stored from today.";
-//       }
-
-//       if (intentObj.mode === "user_only") {
-//         entries = entries.filter(
-//           e => e.type === "conversation" && e.source === "user"
-//         );
-//         return entries.length
-//           ? "Today, you said:\n" + entries.map(e => `• ${e.value}`).join("\n")
-//           : "You didn’t say much today.";
-//       }
-
-//       if (intentObj.mode === "memory") {
-//         entries = entries.filter(e => e.type === "explicit_memory");
-//         return entries.length
-//           ? "Today, I remembered:\n" + entries.map(e => `• ${e.value}`).join("\n")
-//           : "I didn’t store any explicit memory today.";
-//       }
-
-//       if (intentObj.mode === "summary") {
-//         return "Today included conversations and memory interactions.";
-//       }
-
-//       entries = entries.filter(
-//         e => e.type === "conversation" && e.source === "user"
-//       );
-//       return entries.length
-//         ? "Today, we talked about:\n" + entries.map(e => `• ${e.value}`).join("\n")
-//         : "I don’t have conversation records from today.";
-//     }
-
-//     /* ===== DATE-SPECIFIC ===== */
-//     case "EPISODIC_BY_DATE": {
-//       const range = resolveDateRange(intentObj.rawText);
-//       if (!range) return "I couldn’t understand the date clearly.";
-
-//       const entries = episodicMemory
-//         .getByDateRange(range.start.getTime(), range.end.getTime())
-//         .filter(e => e.type === "conversation" && e.source === "user");
-
-//       return entries.length
-//         ? `On ${range.start.toDateString()}, we talked about:\n` +
-//             entries.map(e => `• ${e.value}`).join("\n")
-//         : "I don’t have any conversation records stored for that day.";
-//     }
-
-//     /* ===== SUMMARY ===== */
-//     case "MEMORY_SUMMARY": {
-//       const { subject } = resolveSubject(intentObj.rawText);
-//       const facts = memory.summarize(subject, { minConfidence: 0.6 });
-
-//       if (!facts.length) {
-//         return subject === "user"
-//           ? "I don't remember anything about you yet."
-//           : `I don't remember anything about ${subject} yet.`;
-//       }
-
-//       return facts.map(f => phraseFromConfidence(f, subject, f.key)).join(" ");
-//     }
-
-//     /* ===== LOCAL ===== */
-//     case "LOCAL_SKILL":
-//       if (intentObj.skill === "TIME")
-//         return `The current time is ${new Date().toLocaleTimeString()}.`;
-//       if (intentObj.skill === "DATE")
-//         return `Today's date is ${new Date().toDateString()}.`;
-//   }
-
-//   return "I am still learning this.";
-// }
-
-// /* ================= SYSTEM ================= */
-
-// function openApp(name) {
-//   if (name === "chrome") exec("start chrome");
-//   if (name === "vs code") exec("code");
-//   if (name === "notepad") exec("notepad");
-// }
-
-// function openFolder(path) {
-//   exec(`start "" "${path}"`);
-// }
-
-// module.exports = {
-//   handleIntent,
-//   resolveSubject,
-//   openApp,
-//   openFolder
-// };
 
 
 

@@ -12,16 +12,17 @@
  * - Cooldown-aware (NEW)
  */
 
-const ALLOWED_AI = new Set(["local", "chatgpt", "gemini"]);
+const ALLOWED_AI = new Set(["local", "chatgpt", "gemini" , "groq"]);
 
 // ================= STATE =================
 
-let ACTIVE_AI = "local";
+let ACTIVE_AI = "local"; 
 
 // Temporary disable tracking
 const DISABLED_UNTIL = {
   chatgpt: 0,
-  gemini: 0
+  gemini: 0,
+  groq: 0
 };
 
 const COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
@@ -50,6 +51,10 @@ function connectChatGPT() {
 
 function connectGemini() {
   return setActiveAI("gemini");
+}
+
+function connectGroq() {
+  return setActiveAI("groq");
 }
 
 function connectLocal() {
@@ -92,6 +97,7 @@ module.exports = {
   setActiveAI,
   connectChatGPT,
   connectGemini,
+  connectGroq,
   connectLocal,
   disconnectAI,
 

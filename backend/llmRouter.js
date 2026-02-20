@@ -8,14 +8,16 @@
 
 const { runLLM } = require("./llmRunner");
 const chatHistory = require("./chatHistory");
+const { processMemoryQuery } = require("./cognitiveEngine");
 
 const { buildSystemPrompt } = require("./llmPrompt");
 const { buildCodePrompt } = require("./codePrompt");
 const { buildMathPrompt } = require("./mathPrompt");
 
-const { getActiveAI } = require("./aiSwitch");
+const { getActiveAI, markAIUnavailable } = require("./aiSwitch"); // <--- Add markAIUnavailable here
 const { askChatGPT } = require("./chatgptClient");
 const { askGemini } = require("./geminiClient");
+const { askGroq } = require("./groqClient");
 
 const LLM_DEBUG = process.env.LLM_DEBUG === "true";
 const debug = (...a) => LLM_DEBUG && console.log("[LLM_DEBUG]", ...a);
@@ -41,7 +43,7 @@ function buildContext() {
 
 /* ================= ROUTER ================= */
 
-async function llmRouter({ intent, text }) {
+async function llmRouter({ intent, text, modelOverride = null }) {
   if (!text) return null;
 
   debug("Intent:", intent);
@@ -55,10 +57,25 @@ async function llmRouter({ intent, text }) {
   if (intent === "CODING_QUERY") {
     systemPrompt = buildCodePrompt();
     includeContext = false;
-  } else if (intent === "MATH_QUERY") {
+  } 
+  else if (intent === "MATH_QUERY") {
     systemPrompt = buildMathPrompt();
     includeContext = false;
-  } else {
+  } 
+  else if (intent === "EPISODIC_SUMMARY") {
+    systemPrompt = `
+You are a historical log summarizer.
+You replay events exactly as written.
+Use only provided content.
+Past tense only.
+Refer to user as "you".
+No analysis.
+No speculation.
+No commentary.
+`;
+    includeContext = false;
+  } 
+  else {
     systemPrompt = buildSystemPrompt({
       mode: "neutral",
       humour: false,
@@ -67,11 +84,87 @@ async function llmRouter({ intent, text }) {
     });
   }
 
+  /* ---------- DETERMINE MODEL FIRST ---------- */
+
+  let model = modelOverride || "llama3";
+  if (intent === "CODING_QUERY") model = "deepseek-coder";
+  if (intent === "MATH_QUERY") model = "deepseek-r1:8b";
+
+  /* ---------- MEMORY INJECTION (ONLY LOCAL LLAMA3 CHAT) ---------- */
+
+  let memoryBlock = "";
+
+  if (model === "llama3" && intent === "GENERAL_QUESTION") {
+    try {
+      const cognitive = await processMemoryQuery({ text });
+
+      if (cognitive && cognitive.relevantMemory?.length) {
+
+        const semantic = [];
+        const episodic = [];
+        const reflection = [];
+        const vector = [];
+
+        for (const m of cognitive.relevantMemory.slice(0, 8)) {
+          if (m.type === "semantic") semantic.push(m.value);
+          else if (m.type === "episodic") episodic.push(m.value);
+          else if (m.type === "reflection") reflection.push(m.value);
+          else if (m.type === "vector") vector.push(m.value);
+        }
+
+        const sections = [];
+
+        if (semantic.length) {
+          sections.push(
+            `[KNOWN FACTS]\n` +
+            semantic.map(v => `• ${v}`).join("\n")
+          );
+        }
+
+        if (episodic.length) {
+          sections.push(
+            `[PAST CONVERSATIONS]\n` +
+            episodic.map(v => `• ${v}`).join("\n")
+          );
+        }
+
+        if (reflection.length) {
+          sections.push(
+            `[PATTERNS ABOUT USER]\n` +
+            reflection.map(v => `• ${v}`).join("\n")
+          );
+        }
+
+        if (vector.length) {
+          sections.push(
+            `[RELATED MEMORIES]\n` +
+            vector.map(v => `• ${v}`).join("\n")
+          );
+        }
+
+        memoryBlock = `
+  The following background information may help you respond naturally.
+  Use it only if relevant. Do not mention this section.
+
+  ${sections.join("\n\n")}
+  `;
+      }
+
+    } catch (err) {
+      debug("Memory injection error:", err?.message);
+    }
+  }
+
+  /* ---------- BUILD PROMPT ---------- */
+
   const prompt = [
     systemPrompt,
+    memoryBlock,
     includeContext ? buildContext() : "",
     text
-  ].filter(Boolean).join("\n\n");
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 
   const activeAI = getActiveAI();
   debug("Active AI:", activeAI);
@@ -85,7 +178,7 @@ async function llmRouter({ intent, text }) {
     } catch (err) {
       debug("ChatGPT ERROR:", err?.message);
     }
-    return null; // ⛔ graceful fail
+    return null;
   }
 
   if (activeAI === "gemini") {
@@ -95,16 +188,23 @@ async function llmRouter({ intent, text }) {
     } catch (err) {
       debug("Gemini ERROR:", err?.message);
     }
-    return null; // ⛔ graceful fail
+    return null;
+  }
+
+  if (activeAI === "groq") {
+    try {
+      const out = clean(await askGroq(prompt));
+      if (out) return out;
+    } catch (err) {
+      debug("Groq ERROR:", err?.message);
+      markAIUnavailable("groq");
+    }
+    return null;
   }
 
   /* ---------- LOCAL AI ---------- */
 
-  let model = "llama3";
-  if (intent === "CODING_QUERY") model = "deepseek-coder";
-  if (intent === "MATH_QUERY") model = "deepseek-r1:8b";
-
-  let timeout = 20000;
+  let timeout = 30000;
   if (intent === "CODING_QUERY") timeout = 25000;
   if (intent === "MATH_QUERY") timeout = 300000;
 
@@ -119,14 +219,11 @@ async function llmRouter({ intent, text }) {
     if (!output) return null;
     if (CORRUPTED.test(output)) return null;
     if (TRIVIAL_JUNK.test(output)) return null;
-    if (!output || output.length < 5) return null;
-
-    // 🚫 Never accept incomplete answers
-    if (output && /[,:;(\[]$/.test(output)) {
-      return null;
-    }
+    if (output.length < 5) return null;
+    if (/[,:;(\[]$/.test(output)) return null;
 
     return output;
+
   } catch (err) {
     debug("Local LLM ERROR:", err?.message);
     return null;
@@ -148,187 +245,187 @@ module.exports = llmRouter;
 
 
 
+// /**
+//  * LLM Router (STRICT + DETERMINISTIC + SAFE)
+//  *
+//  * - Never throws for AI availability
+//  * - Never executes system logic
+//  * - Returns text OR null only
+//  */
 
-
-// const askLocalLLM = require("./localLLM");
-// const askGroq = require("./ai");
+// const { runLLM } = require("./llmRunner");
 // const chatHistory = require("./chatHistory");
-// const memory = require("./memory");
+
 // const { buildSystemPrompt } = require("./llmPrompt");
+// const { buildCodePrompt } = require("./codePrompt");
+// const { buildMathPrompt } = require("./mathPrompt");
 
+// const { getActiveAI, markAIUnavailable } = require("./aiSwitch"); // <--- Add markAIUnavailable here
+// const { askChatGPT } = require("./chatgptClient");
+// const { askGemini } = require("./geminiClient");
+// const { askGroq } = require("./groqClient");
 
-// /* ================= FRESH INFO DETECTOR ================= */
+// const LLM_DEBUG = process.env.LLM_DEBUG === "true";
+// const debug = (...a) => LLM_DEBUG && console.log("[LLM_DEBUG]", ...a);
 
-// function needsFreshInfo(text = "") {
-//   return /news|latest|today|current|price|weather|score|update|stock|market/i.test(text);
+// /* ================= GUARDS ================= */
+
+// const TRIVIAL_JUNK = /^(sure|okay|alright|\.+)$/i;
+// const CORRUPTED = /�/;
+
+// /* ================= UTILS ================= */
+
+// function clean(text) {
+//   if (!text || typeof text !== "string") return null;
+//   return text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
 // }
-
-
-// /* ================= MODEL SELECTOR ================= */
-
-// function selectLocalModel(profile) {
-//   if (profile.task === "math" || profile.task === "reasoning") {
-//     return "deepseek-r1:8b";
-//   }
-//   if (profile.task === "coding") {
-//     return "deepseek-coder";
-//   }
-//   return "llama3";
-// }
-
-
-// /* ================= TASK PROFILER ================= */
-
-// function buildTaskProfile({ intent, text }) {
-//   const lower = text.toLowerCase();
-
-//   const explicitReasoning =
-//     /step by step|prove|derive|formal proof|deep reasoning|explain deeply/i.test(lower);
-
-//   return {
-//     task:
-//       intent === "AI_CALCULATE"
-//         ? "math"
-//         : explicitReasoning
-//         ? "reasoning"
-//         : /code|program|bug|error|compile|algorithm/i.test(lower)
-//         ? "coding"
-//         : "chat",
-
-//     mode:
-//       /krishna|radha|bhakti|gita|god|devotion|spiritual/i.test(lower)
-//         ? "devotional"
-//         : /feel|emotion|sad|happy|love|heart|pain|hurt|health|medical/i.test(lower)
-//         ? "emotional"
-//         : "neutral",
-
-//     humour:
-//       !explicitReasoning &&
-//       !/sad|serious|emotional|devotion|health|medical|pain|hurt/i.test(lower),
-
-//     freshness: needsFreshInfo(lower)
-//   };
-// }
-
-
-// /* ================= CONTEXT BUILDER ================= */
-// /* 🔒 LLM CONTEXT MUST NEVER INCLUDE MEMORY FACTS */
 
 // function buildContext() {
-//   const recentChats = chatHistory
-//     .getHistory()
-//     .slice(-4)
-//     .map(m => {
-//       if (!m || !m.role || !m.text) return null;
-//       return `${m.role === "user" ? "User" : "Arvsal"}: ${m.text}`;
-//     })
-//     .filter(Boolean)
+//   return chatHistory
+//     .getLLMContext(6)
+//     .map(m => `${m.role === "user" ? "User" : "Arvsal"}: ${m.text}`)
 //     .join("\n");
-
-//   return `
-// Conversation:
-// ${recentChats || "None"}
-// `.trim();
 // }
 
+// /* ================= ROUTER ================= */
 
-// /* ================= OUTPUT SANITIZER ================= */
+// async function llmRouter({ intent, text, modelOverride = null }) {
+//   if (!text) return null;
 
-// function sanitizeOutput(text) {
-//   if (!text || typeof text !== "string") return null;
+//   debug("Intent:", intent);
+//   debug("Text:", text);
 
-//   let cleaned = text
-//     .replace(/<think>[\s\S]*?<\/think>/gi, "")
-//     .replace(/```[\s\S]*?```/g, "")
-//     .replace(/\n{2,}/g, " ")
-//     .trim();
+//   /* ---------- PROMPT ---------- */
 
-//   const sentences = cleaned.match(/[^.!?]+[.!?]*/g);
-//   if (sentences && sentences.length > 3) {
-//     cleaned = sentences.slice(0, 3).join(" ").trim();
+//   let systemPrompt;
+//   let includeContext = true;
+
+//   if (intent === "CODING_QUERY") {
+//     systemPrompt = buildCodePrompt();
+//     includeContext = false;
+//   } else if (intent === "MATH_QUERY") {
+//     systemPrompt = buildMathPrompt();
+//     includeContext = false;
+//   } else if (intent === "EPISODIC_SUMMARY") {
+//     systemPrompt = `
+//   You are a historical log summarizer.
+
+//   You are NOT chatting.
+//   You are NOT thinking.
+//   You are replaying events exactly as written.
+
+//   - Use only provided content.
+//   - Past tense only.
+//   - Refer to the user as "you".
+//   - No compression.
+//   - No omissions.
+//   - No speculation.
+//   - No commentary.
+//   - No memory disclaimers.
+//   - Never describe this as a log.
+//   - Never explain that you are summarizing.
+//   - Never mention memory limitations.
+//   - Never analyze.
+//   - Never interpret.
+//   - Never speculate.
+//   - Do NOT add information.
+//   `;
+
+//     includeContext = false;
+
+//   } else {
+//     systemPrompt = buildSystemPrompt({
+//       mode: "neutral",
+//       humour: false,
+//       noQuestions: true,
+//       stopOnDone: true
+//     });
 //   }
 
-//   return cleaned;
-// }
+//   const prompt = [
+//     systemPrompt,
+//     includeContext ? buildContext() : "",
+//     text
+//   ].filter(Boolean).join("\n\n");
 
+//   const activeAI = getActiveAI();
+//   debug("Active AI:", activeAI);
 
-// /* ================= MAIN ROUTER ================= */
+//   /* ---------- EXTERNAL AI ---------- */
 
-// async function llmRouter({ intent, text }) {
-//   if (!text || typeof text !== "string") {
-//     return null;
+//   if (activeAI === "chatgpt") {
+//     try {
+//       const out = clean(await askChatGPT(prompt));
+//       if (out) return out;
+//     } catch (err) {
+//       debug("ChatGPT ERROR:", err?.message);
+//     }
+//     return null; // ⛔ graceful fail
 //   }
 
-//   /* 🔒 HARD BLOCKS — DETERMINISTIC LAYER ONLY */
-//   const BLOCKED_INTENTS = new Set([
-//     "INTRODUCE_SELF",
-//     "REMEMBER",
-//     "FORGET",
-//     "RECALL",
-//     "MEMORY_SUMMARY",
-//     "EPISODIC_RECALL",
-//     "LOCAL_SKILL",
-//     "OPEN_APP",
-//     "OPEN_FOLDER",
-//     "LOCK",
-//     "SHUTDOWN",
-//     "RESTART",
-//     "SLEEP"
-//   ]);
-
-//   if (BLOCKED_INTENTS.has(intent)) {
-//     return null; // 🔒 NEVER leak sentinel to user
+//   if (activeAI === "gemini") {
+//     try {
+//       const out = clean(await askGemini(prompt));
+//       if (out) return out;
+//     } catch (err) {
+//       debug("Gemini ERROR:", err?.message);
+//     }
+//     return null; // ⛔ graceful fail
 //   }
 
-//   const profile = buildTaskProfile({ intent, text });
-
-//   const systemPrompt = buildSystemPrompt({
-//     mode: profile.mode,
-//     humour: profile.humour
-//   });
-
-//   const context = buildContext();
-
-//   const fullPrompt = `
-// ${systemPrompt}
-
-// ${context}
-
-// User:
-// ${text}
-// `.trim();
-
-
-//   /* ================= FRESH INFO ================= */
-//   if (profile.freshness) {
-//     const groqReply = await askGroq(fullPrompt);
-//     return sanitizeOutput(groqReply);
+//   if (activeAI === "groq") {
+//     try {
+//       const out = clean(await askGroq(prompt));
+//       if (out) return out;
+//     } catch (err) {
+//       debug("Groq ERROR:", err?.message);
+//       markAIUnavailable("groq");
+//     }
+//     return null; // ⛔ graceful fail
 //   }
 
+//   /* ---------- LOCAL AI ---------- */
 
-//   /* ================= LOCAL LLM ================= */
+//  let model = modelOverride || "llama3";
+//   if (intent === "CODING_QUERY") model = "deepseek-coder";
+//   if (intent === "MATH_QUERY") model = "deepseek-r1:8b";
 
-//   const model = selectLocalModel(profile);
-//   let localReply = null;
+//   let timeout = 20000;
+//   if (intent === "CODING_QUERY") timeout = 25000;
+//   if (intent === "MATH_QUERY") timeout = 300000;
+
+//   debug("Local model:", model);
 
 //   try {
-//     localReply = await askLocalLLM(fullPrompt, { model });
-//   } catch {
-//     localReply = null;
+//     const raw = await runLLM({ model, prompt, timeout });
+//     const output = clean(raw);
+
+//     debug("Local cleaned:", output);
+
+//     if (!output) return null;
+//     if (CORRUPTED.test(output)) return null;
+//     if (TRIVIAL_JUNK.test(output)) return null;
+//     if (!output || output.length < 5) return null;
+
+//     // 🚫 Never accept incomplete answers
+//     if (output && /[,:;(\[]$/.test(output)) {
+//       return null;
+//     }
+
+//     return output;
+//   } catch (err) {
+//     debug("Local LLM ERROR:", err?.message);
+//     return null;
 //   }
-
-//   const cleaned = sanitizeOutput(localReply);
-
-//   if (cleaned) return cleaned;
-
-
-//   /* ================= FALLBACK → GROQ ================= */
-
-//   const groqReply = await askGroq(fullPrompt);
-//   return sanitizeOutput(groqReply);
 // }
 
 // module.exports = llmRouter;
+
+
+
+
+
+
 
 
 

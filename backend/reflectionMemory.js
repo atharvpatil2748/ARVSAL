@@ -12,7 +12,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const FILE = path.join(__dirname, "reflection_memory.json");
+const FILE = path.join(process.cwd(), "reflection_memory.json");
 
 
 /* ================= CONFIG ================= */
@@ -109,6 +109,7 @@ function addReflection({
     save();
     return;
   }
+  console.log("Reflection stored:", insight);
 
   const reflection = {
     id: `${now()}-${Math.random().toString(36).slice(2, 8)}`,

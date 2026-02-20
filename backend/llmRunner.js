@@ -13,7 +13,7 @@ const { spawn } = require("child_process");
 
 /* ================= CONFIG ================= */
 
-const HARD_TIMEOUT = 50000;
+const HARD_TIMEOUT = 100000;
 const MAX_OUTPUT_SIZE = 1000 * 1024;
 
 const LLM_DEBUG = process.env.LLM_DEBUG === "true";
@@ -122,7 +122,7 @@ function runInternal({ model, prompt, timeout = HARD_TIMEOUT }) {
         runLLM({
           model,
           prompt: result + "\nContinue.",
-          timeout: Math.min(timeout, 15000)
+          timeout: Math.min(timeout, 30000)
         }).then(continuation => {
           if (typeof continuation === "string" && continuation.trim()) {
             result = (result + " " + continuation).trim();

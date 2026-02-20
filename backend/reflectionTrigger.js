@@ -16,7 +16,7 @@ const episodicMemory = require("./episodicMemory");
 /* ================= CONFIG ================= */
 
 const MIN_EVENTS_FOR_REFLECTION = 3;
-const MIN_IMPORTANCE_AVG = 0.65;
+const MIN_IMPORTANCE_AVG = 0.58;
 const MIN_KEY_DOMINANCE = 2;
 
 
@@ -38,7 +38,7 @@ function shouldTriggerReflection(subject = "user") {
   subject = normalizeSubject(subject);
 
   // Pull recent episodic memory
-  const recent = episodicMemory.getBySubject(subject, 12);
+  const recent = episodicMemory.getBySubject(subject, 20);
   if (!recent || recent.length < MIN_EVENTS_FOR_REFLECTION) {
     return null;
   }
@@ -47,8 +47,7 @@ function shouldTriggerReflection(subject = "user") {
   const meaningful = recent.filter(e =>
     e &&
     e.importance >= 0.5 &&
-    e.type !== "response" &&
-    e.type !== "system" &&
+    e.type === "conversation" &&
     typeof e.value === "string" &&
     e.value.length > 5
   );
@@ -68,14 +67,24 @@ function shouldTriggerReflection(subject = "user") {
 
   // Theme cohesion via key dominance
   const keyStats = {};
+  const keyCounts = {};
+
   for (const e of meaningful) {
     if (!e.key) continue;
-    keyStats[e.key] = (keyStats[e.key] || 0) + e.importance;
+
+    keyCounts[e.key] = (keyCounts[e.key] || 0) + 1;
+    keyStats[e.key] = (keyStats[e.key] || 0) + (e.importance || 0);
   }
 
-  const dominantKeys = Object.entries(keyStats)
-    .filter(([, score]) => score >= MIN_KEY_DOMINANCE)
-    .map(([key]) => key);
+  const dominantKeys = Object.keys(keyCounts).filter(key => {
+    const count = keyCounts[key];
+    const avgKeyImportance = keyStats[key] / count;
+
+    return (
+      count >= 3 &&                 // frequency threshold
+      avgKeyImportance >= 0.55      // quality threshold
+    );
+  });
 
   // 🚫 No coherent theme → no reflection
   if (!dominantKeys.length) {

@@ -8,7 +8,7 @@
  */
 
 const { embedText } = require("./embeddingModel");
-const { searchByEmbedding } = require("./memorySearch");
+const { searchVectors } = require("./vectorStore");
 
 
 /**
@@ -29,19 +29,15 @@ async function recallByMeaning(query, subject = "user") {
       ? subject.toLowerCase()
       : null;
 
-  const results = searchByEmbedding(embedding, {
+  const results = searchVectors(embedding, {
     subject: safeSubject,
-    minImportance: 0.6,
-    limit: 5 // fetch more, filter harder
+    limit: 5,
+    minScore: 0.48
   });
 
   if (!Array.isArray(results) || !results.length) return null;
 
-  // 🔒 HARD SAFETY FILTER
-  const SAFE_SCORE_FLOOR = 0.42;
-
   const texts = results
-    .filter(r => typeof r.score === "number" && r.score >= SAFE_SCORE_FLOOR)
     .map(r => r.text)
     .filter(Boolean);
 

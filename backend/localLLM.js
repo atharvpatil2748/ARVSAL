@@ -34,7 +34,7 @@ function stripThinking(text) {
 async function askLocalLLM(prompt, options = {}) {
   const {
     model = "llama3",
-    timeout = 20000,
+    timeout = 30000,
     stripThoughts = true
   } = options;
 

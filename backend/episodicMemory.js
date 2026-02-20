@@ -1,9 +1,10 @@
 /**
  * Episodic Memory
  *
- * Human-like memory of events across time.
- * Deterministic, audit-safe.
- * ✅ FIXED: guaranteed persistence
+ * Permanent human-like event memory.
+ * No TTL
+ * No auto-deletion
+ * Fully persistent
  */
 
 const fs = require("fs");
@@ -11,14 +12,9 @@ const path = require("path");
 
 const FILE = path.join(__dirname, "episodic_memory.json");
 
-/* ================= CONFIG ================= */
+/* ================= IMPORTS ================= */
 
 const { scoreImportance } = require("./importanceScorer");
-
-const MAX_EPISODES = 500;
-
-const LOW_IMPORTANCE_TTL = 14 * 24 * 60 * 60 * 1000; // 14 days
-const EPISODE_TTL = 30 * 24 * 60 * 60 * 1000;        // 30 days
 
 /* ================= SESSION ================= */
 
@@ -49,7 +45,7 @@ function save() {
   try {
     fs.writeFileSync(FILE, JSON.stringify(episodes, null, 2));
   } catch {
-    // absolute fail-safe
+    // fail-safe
   }
 }
 
@@ -71,29 +67,6 @@ function timeKeys(ts) {
   };
 }
 
-/* ================= CLEANUP ================= */
-
-function cleanup() {
-  const now = Date.now();
-
-  episodes = episodes.filter(ep => {
-    if (!ep) return false;
-
-    // Important memories live indefinitely
-    if (typeof ep.importance === "number" && ep.importance >= 0.7) return true;
-
-    if (!ep.expiresAt) return true;
-
-    return ep.expiresAt > now;
-  });
-
-  if (episodes.length > MAX_EPISODES) {
-    episodes = episodes.slice(-MAX_EPISODES);
-  }
-
-  save();
-}
-
 /* ================= STORE ================= */
 
 async function store({
@@ -110,7 +83,7 @@ async function store({
 
   subject = String(subject || "user").toLowerCase().trim() || "user";
 
-  // 🚫 Skip confirmation noise
+  // Skip confirmation noise
   if (
     type === "response" &&
     /^(okay, (confirmed|cancelled)|please say yes or no\.?)$/i.test(value.trim())
@@ -118,27 +91,20 @@ async function store({
     return;
   }
 
-  // Normalize importance
+  // Importance normalization
   if (type === "explicit_memory") importance = 1;
   else if (type === "forget") importance = 0.8;
   else if (type === "response") importance = 0.5;
 
-  if (typeof scoreImportance === "function") {
-    try {
-      importance = Math.max(
-        importance,
-        scoreImportance({ type, subject, key, value, source })
-      );
-    } catch {}
-  }
+  try {
+    importance = Math.max(
+      importance,
+      scoreImportance({ type, subject, key, value, source })
+    );
+  } catch {}
 
   const ts = Date.now();
   const { dayKey, weekKey, monthKey } = timeKeys(ts);
-
-  const ttl =
-    importance < 0.5
-      ? LOW_IMPORTANCE_TTL
-      : EPISODE_TTL;
 
   const episode = {
     type,
@@ -152,63 +118,53 @@ async function store({
     timestamp: ts,
     dayKey,
     weekKey,
-    monthKey,
-    expiresAt:
-      (type === "conversation" || type === "response")
-        ? ts + ttl
-        : null
+    monthKey
   };
 
-  /* ===== VECTOR RAG INDEX (SELECTIVE) ===== */
+  /* ===== VECTOR INDEX (OPTIONAL) ===== */
 
-const { embedText } = require("./embeddingModel");
-const { addVector } = require("./vectorStore");
+  const { embedText } = require("./embeddingModel");
+  const { addVector } = require("./vectorStore");
 
-if (
-  importance >= 0.7 &&
-  typeof value === "string" &&
-  value.length >= 10 &&
-  type !== "response" &&
-  type !== "system"
-) {
-  embedText(value).then(embedding => {
-    if (embedding) {
-      addVector({
-        embedding,
-        text: value,
-        subject,
-        importance,
-        timestamp: ts
-      });
-    }
-  });
-}
+  if (
+    importance >= 0.7 &&
+    value.length >= 10 &&
+    type !== "response" &&
+    type !== "system"
+  ) {
+    embedText(value).then(embedding => {
+      if (embedding) {
+        addVector({
+          embedding,
+          text: value,
+          subject,
+          importance,
+          timestamp: ts
+        });
+      }
+    });
+  }
 
   episodes.push(episode);
-  cleanup();
-
+  save();
 }
 
 /* ================= RETRIEVE ================= */
 
 function getByDay(dayKey) {
-  cleanup();
   return episodes.filter(e => e.dayKey === dayKey);
 }
 
 function getByWeek(weekKey) {
-  cleanup();
   return episodes.filter(e => e.weekKey === weekKey);
 }
 
 function getByMonth(monthKey) {
-  cleanup();
   return episodes.filter(e => e.monthKey === monthKey);
 }
 
 function getBySubject(subject, limit = 10) {
   if (!subject) return [];
-  cleanup();
   return episodes
     .filter(e => e.subject === subject.toLowerCase())
     .slice(-limit)
@@ -216,27 +172,13 @@ function getBySubject(subject, limit = 10) {
 }
 
 function getRecent(limit = 10) {
-  cleanup();
   return episodes.slice(-limit).reverse();
 }
 
 function getByDateRange(startTs, endTs) {
-  cleanup();
   return episodes.filter(
     e => e.timestamp >= startTs && e.timestamp <= endTs
   );
-}
-
-function countSimilar({ subject, key, minImportance = 0.7 }) {
-  if (!subject || !key) return 0;
-  cleanup();
-  return episodes.filter(
-    e =>
-      e.subject === subject &&
-      e.key === key &&
-      typeof e.importance === "number" &&
-      e.importance >= minImportance
-  ).length;
 }
 
 /* ================= FORGET ================= */
@@ -264,8 +206,7 @@ module.exports = {
   getByDateRange,
   getBySubject,
   forgetBySubject,
-  forgetAll,
-  countSimilar
+  forgetAll
 };
 
 

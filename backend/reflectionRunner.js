@@ -52,6 +52,9 @@ function isValidSignal(signal) {
  * @param {string} subject
  */
 async function maybeRunReflection(subject = "user") {
+  const reflection = await generateReflection(signal);
+
+  console.log("Generated reflection:", reflection);
   try {
     if (!canRun(subject)) return;
 
