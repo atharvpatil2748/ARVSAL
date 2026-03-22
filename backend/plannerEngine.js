@@ -1,212 +1,114 @@
 /**
- * Planner Engine – Memory-Aware Agentic Brain
+ * Planner Engine — STRICT SCHEMA VERSION (Old-style reliable)
  *
- * - Always memory aware
- * - Strict JSON output
- * - Deterministic
- * - Validated
- * - Production safe
+ * Goal:
+ * Planner outputs EXACT params expected by tools.
+ * No flexible params.
+ * Deterministic JSON.
  */
 
 const { runLLM } = require("./llmRunner");
-const { processMemoryQuery } = require("./cognitiveEngine");
+const { askGemini } = require("./geminiClient");
+const { getActiveAI } = require("./aiSwitch");
 
-const MODEL = "arvsal-planner";
+const LOCAL_MODEL = "arvsal-planner";
 const TIMEOUT = 120000;
-
-const MAX_MEMORY_ITEMS = 8;
 
 /* ================= PROMPT ================= */
 
-function buildPlannerPrompt(userInput, memoryContext) {
-  return `
-You are a STRICT AI planning engine.
+function buildPlannerPrompt(userInput, worldContext = {}) {
+
+return `STRICT PLANNER ENGINE.
+RETURN JSON ONLY.
+NO TEXT.
+NO MARKDOWN.
+NO COMMENTS.
 
 Your job:
-Convert the user request into a structured execution plan.
+Convert user request into TOOL ACTIONS using EXACT schemas.
 
-==========================
-ACTION DETECTION RULE
-==========================
+You MUST follow examples exactly.
 
-Only generate a plan if the user is requesting
-a REAL WORLD EXECUTABLE ACTION such as:
+--------------------------------------------------
+SYSTEM TOOL SCHEMA (IMPORTANT)
 
-- Opening apps
-- Closing apps
-- Locking system
-- Typing text
-- Clicking UI
-- Opening URLs
-- Triggering automation
+Open app:
+{ "tool":"system","action":"open_app","params":{"name":"notepad"} }
 
-If the request is:
-- Emotional
-- Conversational
-- Advice seeking
-- Informational
-- Thinking statement
-- Story
-- Reflection
-- Planning mentally
+Close app:
+{ "tool":"system","action":"close_app","params":{"name":"notepad"} }
 
-You MUST return:
+Open url:
+{ "tool":"system","action":"open_url","params":{"url":"https://google.com"} }
 
-{
-  "goal": "unclear",
-  "steps": [],
-  "risk": "low"
-}
+--------------------------------------------------
+DESKTOP TOOL SCHEMA (IMPORTANT)
 
-CRITICAL RULES:
-- Output ONLY valid JSON.
-- No markdown.
-- No explanations.
-- No comments.
-- No natural language outside JSON.
-- No trailing commas.
-- Never output "Thinking".
-- Never describe reasoning.
+Type text:
+{ "tool":"desktop","action":"type","params":{"text":"hello"} }
 
-==========================
-AVAILABLE TOOLS
-==========================
+Press key:
+{ "tool":"desktop","action":"keypress","params":{"key":"enter"} }
 
-1) "system"
-Purpose:
-- Open desktop applications
-- Open URLs
-- Safe system-level operations
+Click element by description:
+{ "tool":"desktop","action":"click","params":{"target":"send button"} }
 
-Allowed actions:
-- "open_app"     → params: { "name": "app_name" }
-- "close_app"    → params: { "name": "app_name" }
-- "open_url"     → params: { "url": "https://example.com" }
-- "lock"         → params: {}
-- "lock_after"   → params: { "minutes": number }
+Click with coordinates:
+{ "tool":"desktop","action":"click","params":{"x":500,"y":400} }
 
-Examples:
-- Open Notepad → system + open_app + { name: "notepad" }
-- Open Chrome  → system + open_app + { name: "chrome" }
-- Close Notepad → system + close_app + { name: "notepad" }
-- Close Chrome  → system + close_app + { name: "chrome" }
-- Close Task manager  → system + close_app + { name: "tskmgr" }
-- Lock PC      → system + lock + {}
-- Lock in 5 min → system + lock_after + { minutes: 5 }
+Scroll:
+{ "tool":"desktop","action":"scroll","params":{"x":0,"y":-300} }
 
-IMPORTANT:
-- Always use "system" for launching applications.
-- Never use "desktop" to open applications.
-- Never use "desktop" for locking.
--For opening a website:
-  - ALWAYS use "system" + "open_url"
-  - NEVER open browser and type URL manually.
-  - NEVER use desktop tool for navigation.
+Screenshot:
+{ "tool":"desktop","action":"screenshot","params":{} }
 
-------------------------------------------------
+--------------------------------------------------
+RULES (VERY IMPORTANT)
 
-2) "desktop"
-Purpose:
-- UI interaction only
-- Mouse + keyboard control
-- Screen interaction
+1. NEVER invent new param names
+2. NEVER mix actions (type + keypress together ❌)
+3. Each step = ONE action
+4. open_app MUST use params.name (NOT app)
+5. type MUST use params.text
+6. keypress MUST use params.key
+7. scroll MUST use x,y (NOT direction words)
+8. If user says "type and press enter" → TWO STEPS
+9. Prefer desktop + system tools (skills optional)
 
-Allowed actions:
-- "click"        → params: { "x": number, "y": number }
-- "type"         → params: { "text": "string", "delay_ms": number (optional) }
-- "keypress"     → params: { "key": "string", "modifiers": ["control","shift"] (optional), "delay_ms": number (optional) }
-- "scroll"
-- "screenshot"
-- "get_active_window"
-- "close_tab"
-- "close_all_tabs"
+--------------------------------------------------
 
-IMPORTANT RULES:
-- Desktop tool NEVER launches apps.
-- Desktop tool ONLY interacts with already open applications.
-- If a website is opened and then Enter must be pressed, ALWAYS add delay_ms (2000–5000 ms).
-- Never press keys immediately after opening a URL without delay.
+WORLD CONTEXT:
+${JSON.stringify(worldContext)}
 
-------------------------------------------------
-
-3) "memory"
-Purpose:
-- Read or store structured memory
-
-Allowed actions:
-- "recall"
-- "store"
-
-------------------------------------------------
-
-4) "n8n"
-Purpose:
-- Trigger automation workflows
-
-Allowed actions:
-- "execute_workflow"
-
-------------------------------------------------
-
-5) "web"
-Purpose:
-- Web scraping or search
-
-Allowed actions:
-- "search"
-- "scrape"
-
-==========================
-PLAN FORMAT
-==========================
-
-{
-  "goal": "short description",
-  "steps": [
-    {
-      "tool": "tool_name",
-      "action": "action_name",
-      "params": {}
-    }
-  ],
-  "risk": "low | medium | high"
-}
-
-If request is unclear:
-Return:
-
-{
-  "goal": "unclear",
-  "steps": [],
-  "risk": "low"
-}
-
-==========================
-MEMORY CONTEXT
-==========================
-
-${memoryContext}
-
-==========================
-USER REQUEST
-==========================
-
+USER REQUEST:
 ${userInput}
+
+OUTPUT FORMAT:
+
+{
+ "goal":"short goal",
+ "steps":[
+   {"tool":"...","action":"...","params":{}}
+ ],
+ "risk":"low"
+}
 `;
 }
 
-/* ================= JSON SAFETY ================= */
+/* ================= PARSER ================= */
 
 function safeParseJSON(text) {
   if (!text || typeof text !== "string") return null;
 
   try {
-    const start = text.indexOf("{");
-    const end = text.lastIndexOf("}");
-    if (start === -1 || end === -1) return null;
+    text = text.replace(/```json/g, "").replace(/```/g, "").trim();
+    return JSON.parse(text);
+  } catch {}
 
-    const jsonString = text.slice(start, end + 1);
-    return JSON.parse(jsonString);
+  try {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) return null;
+    return JSON.parse(match[0]);
   } catch {
     return null;
   }
@@ -216,59 +118,38 @@ function safeParseJSON(text) {
 
 function validatePlan(plan) {
   if (!plan || typeof plan !== "object") return false;
-  if (typeof plan.goal !== "string") return false;
   if (!Array.isArray(plan.steps)) return false;
-  if (!["low", "medium", "high"].includes(plan.risk)) return false;
 
-  for (const step of plan.steps) {
-    if (!step.tool || !step.action) return false;
-    if (typeof step.params !== "object") return false;
+  for (const s of plan.steps) {
+    if (!s.tool || !s.action || typeof s.params !== "object") return false;
   }
-
   return true;
-}
-
-/* ================= MEMORY FORMATTER ================= */
-
-function formatMemoryBlock(memoryItems = []) {
-  if (!memoryItems.length) return "None";
-
-  return memoryItems
-    .slice(0, MAX_MEMORY_ITEMS)
-    .map((m, i) =>
-      `[${i + 1}] (${m.type}) ${m.value}`
-    )
-    .join("\n");
 }
 
 /* ================= MAIN ================= */
 
-async function generatePlan({ userInput }) {
+async function generatePlan({ userInput, worldContext }) {
   if (!userInput) return null;
 
   try {
+    const prompt = buildPlannerPrompt(userInput, worldContext);
 
-    // 🔥 ALWAYS MEMORY AWARE
-    const cognitive = await processMemoryQuery({
-      text: userInput
-    });
+    const activeAI = getActiveAI();
+    let raw = null;
 
-    const memoryItems =
-      cognitive?.relevantMemory || [];
+    if (activeAI === "gemini") {
+      try {
+        raw = await askGemini(prompt);
+      } catch {}
+    }
 
-    const memoryContext =
-      formatMemoryBlock(memoryItems);
-
-    const prompt = buildPlannerPrompt(
-      userInput,
-      memoryContext
-    );
-
-    const raw = await runLLM({
-      model: MODEL,
-      prompt,
-      timeout: TIMEOUT
-    });
+    if (!raw) {
+      raw = await runLLM({
+        model: LOCAL_MODEL,
+        prompt,
+        timeout: TIMEOUT
+      });
+    }
 
     console.log("\n=== RAW PLANNER OUTPUT ===");
     console.log(raw);
@@ -277,17 +158,210 @@ async function generatePlan({ userInput }) {
     const parsed = safeParseJSON(raw);
 
     if (!validatePlan(parsed)) {
+      console.log("[Planner] invalid plan:", parsed);
       return null;
     }
 
     return parsed;
 
   } catch (err) {
-    console.log("Planner Engine Error:", err?.message);
+    console.log("[Planner] error:", err?.message);
     return null;
   }
 }
 
-module.exports = {
-  generatePlan
-};
+module.exports = { generatePlan };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// /**
+//  * Planner Engine — AI-Mode Aware (Gemini + Local)
+//  *
+//  * - Respects getActiveAI() — uses Gemini when connected, local otherwise
+//  * - Always memory aware (cognitive engine)
+//  * - Accepts screenContext + actionHints from orchestrator
+//  * - Strict JSON output, validated
+//  * - Production safe
+//  */
+
+// const { runLLM } = require("./llmRunner");
+// const { askGemini } = require("./geminiClient");
+// const { getActiveAI } = require("./aiSwitch");
+
+
+// const LOCAL_MODEL = "arvsal-planner";
+// const TIMEOUT = 120000;
+// const MAX_MEMORY_ITEMS = 8;
+
+// /* ================= PROMPT BUILDER ================= */
+
+// function buildPlannerPrompt(userInput, worldContext) {
+//   const lower = userInput.toLowerCase();
+
+//   const needsWeb = /search|scrape|look up/i.test(lower);
+//   const needsN8n = /workflow|automate|n8n/i.test(lower);
+//   const needsDesktop = /click|type|keypress|scroll|screenshot|send|fill|press/i.test(lower);
+
+//   let toolsList = `1) "system"\nActions: "open_app" {name}, "close_app" {name}, "open_url" {url}, "lock", "lock_after" {minutes}\n* Always use system for app launch.\n* Always use open_url for sites.\n`;
+
+//   if (needsDesktop || (!needsWeb && !needsN8n)) {
+//     toolsList += `2) "desktop" (UI control — never launches apps)\nActions:\n- "click" {target, x?, y?} → click a UI element. params.target = element description.\n- "type" {text, delay_ms?} → type text at cursor. params.text = exact text.\n- "keypress" {key, modifiers?} → press key. key = "enter","tab","escape","backspace","ctrl+c" etc.\n- "scroll" {direction, amount?} → scroll page. direction = "down","up","left","right". NO click needed.\n- "screenshot" → take screenshot.\n- "close_tab" → close current tab.\n- "close_all_tabs" → close all tabs.\nRULES:\n* Use "scroll" action for scroll up/down — NEVER click scrollbar.\n* Use "keypress" for enter/tab/escape — NEVER click buttons for these.\n* For "type": params.text = the text to type (required).\n* ALWAYS add delay_ms (2000-5000) between open_url and type.\n`;
+//   }
+
+//   toolsList += `3) "memory"\nActions: "recall", "store"\n`;
+//   if (needsN8n) toolsList += `4) "n8n"\nActions: "execute_workflow"\n`;
+//   if (needsWeb) toolsList += `5) "web"\nActions: "search", "scrape"\n`;
+//   toolsList += `6) "skill" (high level abilities)
+//   Actions:
+//   - "send_message" {text}
+//   - "scroll" {direction}
+//   - "navigate" {target}
+//   - "fill_form" {fields}
+//   - "suggestion" {text}
+
+//   RULE:
+//   Prefer skill over raw desktop steps when possible.
+//   `;
+
+// return `STRICT PLANNER ENGINE. JSON ONLY. NO EXPLANATION.
+
+// Convert the user request into a structured JSON action plan.
+// If the request is conversational/unclear → return {"goal":"unclear","steps":[],"risk":"low"}
+
+// [TOOLS]
+// ${toolsList}
+
+// [WORLD CONTEXT]
+// ${JSON.stringify(worldContext, null, 2)}
+
+// [USER REQUEST]
+// ${userInput}
+
+// [OUTPUT FORMAT — return ONLY this JSON]
+// {
+//   "goal": "one line description",
+//   "steps": [{"tool":"name", "action":"action_name", "params":{}}],
+//   "risk": "low"
+// }`;
+// }
+
+// /* ================= JSON PARSER ================= */
+
+// function safeParseJSON(text) {
+//   if (!text || typeof text !== "string") return null;
+
+//   try {
+//     // remove markdown fences
+//     text = text.replace(/```json/g, "").replace(/```/g, "").trim();
+
+//     // try direct parse
+//     return JSON.parse(text);
+//   } catch {}
+
+//   try {
+//     // extract first json object
+//     const match = text.match(/\{[\s\S]*\}/);
+//     if (!match) return null;
+
+//     const candidate = match[0]
+//       .replace(/\\'/g, "'")     // fix escaped single quotes
+//       .replace(/\n/g, " ");
+
+//     return JSON.parse(candidate);
+//   } catch {
+//     return null;
+//   }
+// }
+
+// /* ================= VALIDATION ================= */
+
+// function validatePlan(plan) {
+//   if (!plan || typeof plan !== "object") return false;
+//   if (typeof plan.goal !== "string") return false;
+//   if (!Array.isArray(plan.steps)) return false;
+//   if (!["low", "medium", "high"].includes(plan.risk)) return false;
+//   for (const step of plan.steps) {
+//     if (!step.tool || !step.action) return false;
+//     if (typeof step.params !== "object") return false;
+//   }
+//   return true;
+// }
+
+// /* ================= MEMORY FORMATTER ================= */
+
+// function formatMemoryBlock(items = []) {
+//   if (!items.length) return "None";
+//   return items
+//     .slice(0, MAX_MEMORY_ITEMS)
+//     .map((m, i) => `[${i + 1}] (${m.type}) ${m.value}`)
+//     .join("\n");
+// }
+
+// /* ================= MAIN ================= */
+
+// async function generatePlan({ userInput, worldContext }) {
+//   if (!userInput) return null;
+
+//   try {
+
+//     const prompt = buildPlannerPrompt(userInput, worldContext || {});
+
+//     const activeAI = getActiveAI();
+//     let raw = null;
+
+//     /* ===== GEMINI (when connected) ===== */
+//     if (activeAI === "gemini") {
+//       console.log("[Planner] Using Gemini for plan generation");
+//       try {
+//         raw = await askGemini(prompt);
+//       } catch (err) {
+//         console.log("[Planner] Gemini failed, falling back to local:", err?.message);
+//       }
+//     }
+
+//     /* ===== LOCAL (default + fallback) ===== */
+//     if (!raw) {
+//       console.log(`[Planner] Using local model: ${LOCAL_MODEL}`);
+//       raw = await runLLM({ model: LOCAL_MODEL, prompt, timeout: TIMEOUT });
+//     }
+
+//     console.log("\n=== RAW PLANNER OUTPUT ===");
+//     console.log(raw);
+//     console.log("===========================\n");
+
+//     const parsed = safeParseJSON(raw);
+
+//     if (!validatePlan(parsed)) {
+//       console.log("[Planner] Validation failed — plan was:", parsed);
+//       return null;
+//     }
+
+//     return parsed;
+
+//   } catch (err) {
+//     console.log("[Planner] Error:", err?.message);
+//     return null;
+//   }
+// }
+
+// module.exports = { generatePlan };

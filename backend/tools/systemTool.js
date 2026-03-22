@@ -86,60 +86,62 @@ async function execute(actionObject) {
 
       if (platform === "win32") {
 
-      const NATIVE_EXECUTABLES = {
-        notepad: "notepad",
-        calculator: "calc",
-        calc: "calc",
-        paint: "mspaint",
-        cmd: "cmd",
-        powershell: "powershell",
-        explorer: "explorer",
-        taskmanager: "taskmgr",
-        task_manager: "taskmgr",
-        controlpanel: "control",
-        control_panel: "control",
-        device_manager: "devmgmt.msc",
-        services: "services.msc",
-        regedit: "regedit",
-        msconfig: "msconfig"
-      };
+        const NATIVE_EXECUTABLES = {
+          notepad: "notepad",
+          calculator: "calc",
+          calc: "calc",
+          paint: "mspaint",
+          cmd: "cmd",
+          powershell: "powershell",
+          explorer: "explorer",
+          taskmanager: "taskmgr",
+          task_manager: "taskmgr",
+          controlpanel: "control",
+          control_panel: "control",
+          device_manager: "devmgmt.msc",
+          services: "services.msc",
+          regedit: "regedit",
+          msconfig: "msconfig"
+        };
 
-      const WINDOWS_URI_APPS = {
-        settings: "ms-settings:",
-        bluetooth: "ms-settings:bluetooth",
-        wifi: "ms-settings:network-wifi",
-        network: "ms-settings:network",
-        display: "ms-settings:display",
-        camera: "microsoft.windows.camera:",
-        store: "ms-windows-store:",
-        calendar: "outlookcal:"
-      };
+        const WINDOWS_URI_APPS = {
+          settings: "ms-settings:",
+          bluetooth: "ms-settings:bluetooth",
+          wifi: "ms-settings:network-wifi",
+          network: "ms-settings:network",
+          display: "ms-settings:display",
+          camera: "microsoft.windows.camera:",
+          store: "ms-windows-store:",
+          calendar: "outlookcal:"
+        };
 
-      const WEB_FALLBACK = {
-        youtube: "https://www.youtube.com",
-        whatsapp: "https://web.whatsapp.com"
-      };
+        const WEB_FALLBACK = {
+          youtube: "https://www.youtube.com",
+          whatsapp: "https://web.whatsapp.com"
+        };
 
-      const CLI_APPS = {
-        ollama: "ollama"
-      };
+        const CLI_APPS = {
+          ollama: "ollama"
+        };
 
-      if (NATIVE_EXECUTABLES[app]) {
-        command = `start "" ${NATIVE_EXECUTABLES[app]}`;
+        if (NATIVE_EXECUTABLES[app]) {
+          command = `start "" ${NATIVE_EXECUTABLES[app]}`;
+        }
+        else if (WINDOWS_URI_APPS[app]) {
+          command = `start "" ${WINDOWS_URI_APPS[app]}`;
+        }
+        else if (WEB_FALLBACK[app]) {
+          command = `start "" ${WEB_FALLBACK[app]}`;
+        }
+        else if (CLI_APPS[app]) {
+          command = `start "" ${CLI_APPS[app]}`;
+        }
+        else {
+          const safeApp = app.replace(/'/g, "''");
+          const psCommand = `$app = Get-StartApps | Where-Object { $_.Name -match '${safeApp}' } | Select-Object -First 1; if ($app) { explorer.exe ('shell:AppsFolder\\' + $app.AppID) } else { start '' '${safeApp}' }`;
+          command = `powershell -NoProfile -WindowStyle Hidden -Command "${psCommand}"`;
+        }
       }
-      else if (WINDOWS_URI_APPS[app]) {
-        command = `start "" ${WINDOWS_URI_APPS[app]}`;
-      }
-      else if (WEB_FALLBACK[app]) {
-        command = `start "" ${WEB_FALLBACK[app]}`;
-      }
-      else if (CLI_APPS[app]) {
-        command = `start "" ${CLI_APPS[app]}`;
-      }
-      else {
-        command = `start "" "${app}"`;
-      }
-    }
 
       if (!command) {
         return { success: false, error: "Unsupported platform" };
@@ -161,13 +163,17 @@ async function execute(actionObject) {
       }
 
       let command;
+      let safeUrl = url.trim();
+      if (!/^https?:\/\//i.test(safeUrl)) {
+        safeUrl = "https://" + safeUrl;
+      }
 
       if (process.platform === "win32")
-        command = `start "" "${url}"`;
+        command = `start "" "${safeUrl}"`;
       else if (process.platform === "darwin")
-        command = `open "${url}"`;
+        command = `open "${safeUrl}"`;
       else
-        command = `xdg-open "${url}"`;
+        command = `xdg-open "${safeUrl}"`;
 
       exec(command);
 
@@ -185,21 +191,23 @@ async function execute(actionObject) {
       }
 
       const app = target.toLowerCase();
+      const safeApp = app.replace(/'/g, "''");
 
       let command = null;
 
       if (process.platform === "win32") {
 
         const PROCESS_MAP = {
-          notepad: "notepad.exe",
-          chrome: "chrome.exe",
-          ollama: "ollama.exe",
-          camera: "WindowsCamera.exe"
+          notepad: "notepad",
+          chrome: "chrome",
+          ollama: "ollama",
+          camera: "WindowsCamera"
         };
 
-        const processName = PROCESS_MAP[app] || `${app}.exe`;
+        const processName = PROCESS_MAP[app] || safeApp;
 
-        command = `taskkill /IM ${processName} /F`;
+        const psCommand = `Get-Process | Where-Object { $_.MainWindowTitle -match '${processName}' -or $_.Name -match '${processName}' } | Stop-Process -Force`;
+        command = `powershell -NoProfile -WindowStyle Hidden -Command "${psCommand}"`;
       }
 
       exec(command);

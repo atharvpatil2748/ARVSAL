@@ -1,3 +1,4 @@
+
 /**
  * Arvsal Server
  * Deterministic-first command pipeline
@@ -40,6 +41,16 @@ const {
   clearConfirmation
 } = require("./confirmManager");
 
+/* ================= PENDING SUGGESTION STATE ================= */
+// Manages "type 1/2/3 to confirm" flow for content suggestions
+
+let _pendingSuggestion = null;
+
+function setPendingSuggestion(data) { _pendingSuggestion = data; }
+function getPendingSuggestion() { return _pendingSuggestion; }
+function clearPendingSuggestion() { _pendingSuggestion = null; }
+
+
 /* ================= BRAIN ================= */
 
 const normalize = require("./normalizer");
@@ -68,9 +79,17 @@ const visionRouter = require("./visionRouter");
 const { runOCR } = require("./ocrRunner");
 const { isTextHeavy } = require("./visionAnalyzer");
 const sharp = require("sharp");
-const { safeDelete } = require("./fileCleanup");
+const { createTempFile, safeDelete, cleanupAll } = require("./utils/safeTempManager");
+const interaction = require("./agent/interactionModeManager");
 const conversionEngine = require("./conversionEngine");
+const { classifyScreen } = require("./screenClassifier");
 
+
+/* ================= VISION-DRIVEN ACTION LAYER (NEW) ================= */
+
+const { handleScreenAction } = require("./screenActionOrchestrator");
+const { agentLoop } = require("./agent/agentLoop");
+const { suggestContent } = require("./contentSuggester");
 
 /* ================= REFLECTION ================= */
 
@@ -144,10 +163,8 @@ function stripWakeWord(text = "") {
 
 async function analyzeScreen(prompt) {
 
-  const ts = Date.now();
-
-  const tempPath = `C:/Users/athar/AppData/Local/Temp/arvsal_${ts}.png`;
-  const processedPath = `C:/Users/athar/AppData/Local/Temp/arvsal_${ts}_processed.png`;
+  const tempPath = createTempFile("screen", ".png");
+  const processedPath = createTempFile("screen_processed", ".png");
 
   let ocrText = "";
   let result;
@@ -184,29 +201,33 @@ async function analyzeScreen(prompt) {
 
       console.log("FULL OCR LENGTH:", ocrText.length);
     }
+    const screenType = classifyScreen(ocrText);
+    console.log("SCREEN TYPE:", screenType);
 
     // ===== TEXT MODE =====
     if (isTextHeavy(ocrText)) {
 
       const textPrompt = `
-You are performing technical screen analysis using raw OCR text.
+      Screen context: ${screenType}
 
-STRICT RULES:
-- Use ONLY the extracted text below.
-- Do NOT describe it as a screenshot.
-- Do NOT speculate.
-- Quote exact phrases.
-- Be precise and technical.
+      You are performing technical screen analysis using raw OCR text.
 
-Extracted Text:
--------------------------
-${ocrText}
--------------------------
+      STRICT RULES:
+      - Use ONLY extracted text
+      - Be precise
+      - Adapt explanation to the screen context (${screenType})
+      - Do NOT speculate
+      - Quote exact phrases
 
-User request:
-${prompt || "Analyze and explain clearly."}
-`;
+      Extracted Text:
+      -------------------------
+      ${ocrText}
+      -------------------------
 
+      User request:
+      ${prompt || "Analyze and explain clearly."}
+      `;
+      
       result = await llmRouter({
         intent: "GENERAL_QUESTION",
         text: textPrompt
@@ -245,6 +266,112 @@ setInterval(() => {
 
 /* ================= AUDIO (WHISPER) ================= */
 
+// app.post("/audio", async (req, res) => {
+//   try {
+//     if (!req.body || !req.body.length) {
+//       return res.json({ error: "Empty audio buffer" });
+//     }
+
+//     const timestamp = Date.now();
+//     const webmPath = path.join(__dirname, `temp_${timestamp}.webm`);
+//     const wavPath = path.join(__dirname, `temp_${timestamp}.wav`);
+
+//     // 1️⃣ Write the incoming buffer
+//     fs.writeFileSync(webmPath, req.body);
+
+//     // 2️⃣ Convert to 16kHz Mono WAV (Standard for whisper.cpp)
+//     const ffmpegExe = "C:\\Users\\athar\\Downloads\\ffmpeg-8.0.1-essentials_build\\ffmpeg-8.0.1-essentials_build\\bin\\ffmpeg.exe";
+
+//     await new Promise((resolve, reject) => {
+//       const ff = spawn(ffmpegExe, [
+//         "-y",
+//         "-i", webmPath,
+//         "-ar", "16000",
+//         "-ac", "1",
+//         wavPath
+//       ]);
+//       ff.on("close", code => code === 0 ? resolve() : reject(new Error("FFmpeg failed")));
+//     });
+
+//     // 3️⃣ Run the 3.1GB Large-v3 Model with "Hardened" Settings
+//     const whisperExe = path.resolve(__dirname, "../whisper.cpp/build/bin/whisper-cli.exe");
+//     const modelPath = "C:\\Users\\athar\\OneDrive\\Desktop\\arvsal\\whisper.cpp\\models\\ggml-large-v3.bin";
+
+//     let output = "";
+    
+//     // Using a specific prompt to anchor Marathi/Hindi translations
+//     const internalPrompt = "Marathi and Hindi audio translated to English. Words like Mala, Sang, Tujha, Arvsal.";
+
+//     const whisper = spawn(whisperExe, [
+//       "-m", modelPath,
+//       "-f", wavPath,
+//       "-tr",              // 🚩 Translate to English
+//       "-nt",              // 🚩 No timestamps
+//       "-np",              // 🚩 No system logs in output
+//       "-dev", "0",        // 🚩 Use RTX 4060 GPU
+//       "-t", "8",          // 🚩 Use 8 CPU threads
+//       "-tpi", "0.0",      // 🚩 Temperature 0: Maximum consistency (Stops hallucinations)
+//       "-bs", "5",         // 🚩 Beam Size 5: High accuracy search for Marathi
+//       "--prompt", internalPrompt
+//     ]);
+
+//     whisper.stdout.on("data", (d) => {
+//       output += d.toString();
+//     });
+
+//     whisper.on("close", (code) => {
+//       // Cleanup temporary files immediately
+//       if (fs.existsSync(webmPath)) fs.unlinkSync(webmPath);
+//       if (fs.existsSync(wavPath)) fs.unlinkSync(wavPath);
+
+//       if (code !== 0) {
+//         console.error("Whisper Error Code:", code);
+//         return res.json({ error: "Whisper processing failed" });
+//       }
+
+//       // 4️⃣ Advanced Scrubber: Remove hallucinations and "Prompt Leaks"
+//       let text = output.trim();
+      
+//       // Words to remove if the model "repeats" your instructions
+//       const promptLeaks = [
+//         "marathi and hindi", 
+//         "assistant context", 
+//         "code-switching", 
+//         "arvsal assistant",
+//         "maladzau",
+//         "jani di"
+//       ];
+
+//       promptLeaks.forEach(word => {
+//         const regex = new RegExp(word, "gi");
+//         text = text.replace(regex, "");
+//       });
+
+//       // Remove specific "Silent Room" tokens
+//       text = text.replace(/\.|\-|_/g, "").trim();
+
+//       // Hallucination Filter for short/nonsense words
+//       const hallucinations = ["you", "thank you", "subtitles by", "watching"];
+//       const lowerText = text.toLowerCase();
+      
+//       if (!text || hallucinations.includes(lowerText) || text.length < 3) {
+//         console.log("🤐 Silence/Hallucination discarded.");
+//         return res.json({ text: "" }); 
+//       }
+
+//       console.log(`✅ Final Cleaned Translation: ${text}`);
+      
+//       // Send back to your Electron frontend
+//       res.json({ text });
+//     });
+
+//   } catch (err) {
+//     console.error("CRITICAL SERVER ERROR:", err);
+//     res.json({ error: "Audio processing failed", details: err.message });
+//   }
+// });
+
+
 app.post("/audio",async (req, res) => {
     try {
       if (!req.body || !req.body.length) {
@@ -252,8 +379,8 @@ app.post("/audio",async (req, res) => {
       }
 
       const base = `arvsal_${Date.now()}`;
-      const webmPath = path.join(os.tmpdir(), `${base}.webm`);
-      const wavPath  = path.join(os.tmpdir(), `${base}.wav`);
+      const webmPath = createTempFile("audio", ".webm");
+      const wavPath  = createTempFile("audio", ".wav");
 
       // 1️⃣ write WEBM exactly as received
       fs.writeFileSync(webmPath, req.body);
@@ -300,8 +427,11 @@ app.post("/audio",async (req, res) => {
       whisper.stderr.on("data", () => {});
 
       whisper.on("close", () => {
-        fs.unlinkSync(webmPath);
-        fs.unlinkSync(wavPath);
+        safeDelete(webmPath);
+        safeDelete(wavPath);
+        
+        // 🔥 Clean streaming state cleanly when a full audio submission occurs
+        streamFullText = "";
 
         const text = output
           .split("\n")
@@ -323,6 +453,137 @@ app.post("/audio",async (req, res) => {
   }
 );
 
+let streamFullText = "";
+let lastStreamTime = 0;
+
+function mergeOverlappingText(base, addition) {
+  if (!base) return addition;
+  if (!addition) return base;
+
+  const bWords = base.split(/\s+/).filter(Boolean);
+  const aWords = addition.split(/\s+/).filter(Boolean);
+
+  const bLower = bWords.map(w => w.toLowerCase().replace(/[^\w\s]/g, ""));
+  const aLower = aWords.map(w => w.toLowerCase().replace(/[^\w\s]/g, ""));
+
+  let overlapIndex = -1;
+  const maxOverlap = Math.min(bLower.length, aLower.length);
+
+  for (let i = 1; i <= maxOverlap; i++) {
+    const bSlice = bLower.slice(-i).join(" ");
+    const aSlice = aLower.slice(0, i).join(" ");
+    if (bSlice === aSlice) {
+      overlapIndex = i;
+    }
+  }
+
+  if (overlapIndex > 0) {
+    // Keep base before overlap, attach new suffix
+    return bWords.concat(aWords.slice(overlapIndex)).join(" ");
+  }
+
+  // Fallback: If Whisper heavily corrected an earlier short fragment, just replace it
+  if (aWords.length >= 3 && bWords.length <= 3) {
+      return addition;
+  }
+
+  return base + " " + addition;
+}
+
+app.post("/audio/stream", async (req, res) => {
+  try {
+    const now = Date.now();
+    if (now - lastStreamTime > 4000) {
+      streamFullText = ""; // Session timeout reset
+    }
+    lastStreamTime = now;
+
+    console.log("STREAM HIT:", req.body?.length);
+    if (!req.body || !req.body.length) {
+      return res.json({ text: "" });
+    }
+
+    const webmPath = createTempFile("stream", ".webm");
+    const wavPath  = createTempFile("stream", ".wav");
+
+    // Write full accumulated WebM payload directly (which has valid headers)
+    fs.writeFileSync(webmPath, req.body);
+
+    const ffmpegExe =
+      "C:\\Users\\athar\\Downloads\\ffmpeg-8.0.1-essentials_build\\ffmpeg-8.0.1-essentials_build\\bin\\ffmpeg.exe";
+
+    // 🔄 Convert to WAV
+    await new Promise((resolve, reject) => {
+      const ff = spawn(ffmpegExe, [
+        "-y",
+        "-i", webmPath,
+        "-ar", "16000",
+        "-ac", "1",
+        wavPath
+      ]);
+
+      ff.stderr.on("data", d => console.log("FFMPEG:", d.toString()));
+
+      ff.on("close", code => {
+        if (code === 0) resolve();
+        else {
+          console.error("FFmpeg failed with code:", code);
+          reject(new Error("FFmpeg failed"));
+        }
+      });
+    });
+
+    const whisperExe = path.resolve(
+      __dirname,
+      "../whisper.cpp/build/bin/whisper-cli.exe"
+    );
+
+    const modelPath = path.resolve(
+      __dirname,
+      "../whisper.cpp/models/ggml-small.en.bin"
+    );
+
+    let output = "";
+
+    const whisper = spawn(whisperExe, [
+      "-m", modelPath,
+      "-f", wavPath,
+      "-nt"
+    ]);
+
+    whisper.stdout.on("data", d => {
+      const out = d.toString();
+      output += out;
+      console.log("Whisper Target Output:", out.trim());
+    });
+    
+    whisper.stderr.on("data", d => {
+      // ignore verbose whisper stderr loading logs
+    });
+
+    whisper.on("close", () => {
+      safeDelete(webmPath);
+      safeDelete(wavPath);
+
+      const text = output
+        .split("\n")
+        .map(l => l.replace(/^.*\]\s*/, ""))
+        .join(" ")
+        .trim();
+
+      if (text) {
+        streamFullText = mergeOverlappingText(streamFullText, text);
+      }
+
+      res.json({ text: streamFullText });
+    });
+
+  } catch (err) {
+    res.json({ text: "" });
+  }
+});
+
+
 /* ================= TTS (PIPER) ================= */
 
 app.post("/speak", async (req, res) => {
@@ -333,7 +594,7 @@ app.post("/speak", async (req, res) => {
     }
 
     const base = `arvsal_tts_${Date.now()}`;
-    const wavPath = path.join(os.tmpdir(), `${base}.wav`);
+    const wavPath = createTempFile("tts", ".wav");
 
     const piperExe =
       "C:\\Users\\athar\\Downloads\\piper_windows_amd64\\piper\\piper.exe";
@@ -351,7 +612,7 @@ app.post("/speak", async (req, res) => {
 
     piper.on("close", () => {
       const audio = fs.readFileSync(wavPath);
-      fs.unlinkSync(wavPath);
+      safeDelete(wavPath);
 
       res.set("Content-Type", "audio/wav");
       res.send(audio);
@@ -362,6 +623,7 @@ app.post("/speak", async (req, res) => {
     res.status(500).json({ error: "TTS failed" });
   }
 });
+
 /* ================= COMMAND ENDPOINT ================= */
 
 app.post("/command", async (req, res) => {
@@ -551,13 +813,14 @@ app.post("/command", async (req, res) => {
 
   if (source === "telegram" && cleanRawText.toLowerCase().startsWith("screenshot")) {
 
-    const tempPath = "C:/Users/athar/AppData/Local/Temp/arvsal_screenshot.png";
+    const tempPath = createTempFile("telegram_screen", ".png");
 
     await screenshot({ filename: tempPath });
+    await new Promise(r => setTimeout(r, 200));
 
     await sendTelegramDocument(tempPath);
 
-    fs.unlinkSync(tempPath); // 🔥 delete after sending
+    safeDelete(tempPath);
 
     return res.json({ reply: "Screenshot sent and deleted locally." });
   }
@@ -628,7 +891,42 @@ app.post("/command", async (req, res) => {
     return res.json({ reply });
   }
 
-  /* ---------- DETERMINISTIC INTENTS (NO LLM EVER) ---------- */
+  /* ---------- PENDING SUGGESTION (1/2/3/none) ---------- */
+
+  const _pendingSug = getPendingSuggestion();
+  if (_pendingSug) {
+    const rawNum = cleanRawText.trim();
+
+    if (/^[1-3]$/.test(rawNum)) {
+      const idx = parseInt(rawNum, 10) - 1;
+      const chosen = _pendingSug.suggestions[idx];
+      clearPendingSuggestion();
+
+      if (chosen) {
+        const { executeTool } = require("./tools/toolRegistry");
+        await executeTool({
+          tool: "desktop",
+          action: "type",
+          params: { text: chosen }
+        });
+        const reply = `Typed: "${chosen}"`;
+        chatHistory.addMessage("arvsal", reply);
+        return res.json({ reply });
+      } else {
+        const reply = "That option wasn't found. Try 1, 2, or 3.";
+        chatHistory.addMessage("arvsal", reply);
+        return res.json({ reply });
+      }
+    }
+
+    if (/^none$/i.test(rawNum)) {
+      clearPendingSuggestion();
+      const reply = "Suggestion cancelled.";
+      chatHistory.addMessage("arvsal", reply);
+      return res.json({ reply });
+    }
+  }
+
 
   if ([
     "INTRODUCE_SELF",
@@ -848,8 +1146,129 @@ if (
         break;
 
       /* ===== GENERATIVE (LAST) ===== */
+
+      /* ===== SCREEN ACTION (Vision Automation Layer) ===== */
+
+      case "SCREEN_ACTION": {
+        interaction.setMode("action");
+        skipEpisodic = true;
+        skipPersonality = true;
+
+        const actionResult = await agentLoop(intentObj.rawText);
+
+        if (actionResult.needsClarification) {
+          // Ask user before doing anything
+          reply = actionResult.question;
+          skipEpisodic = true;
+        } else {
+          reply = actionResult.response;
+        }
+        interaction.resetMode();
+        break;
+      }
+
+      case "SCREEN_ACTION_MIXED": {
+        interaction.setMode("mixed");
+        // Mixed: chat response + screen action in parallel
+        skipEpisodic = false;
+        skipPersonality = false;
+
+        const [chatReply, actionResult] = await Promise.all([
+          llmRouter({ intent: "GENERAL_QUESTION", text: intentObj.rawText }),
+          handleScreenAction(intentObj.rawText)
+        ]);
+
+        if (actionResult.needsClarification) {
+          // If action needs info, prioritize asking over chat
+          reply = actionResult.question;
+          skipEpisodic = true;
+        } else {
+          const actionSummary = actionResult.success
+            ? `\n\n✅ ${actionResult.response}`
+            : `\n\n⚠️ ${actionResult.response}`;
+          reply = (chatReply || "") + actionSummary;
+        }
+        interaction.resetMode();
+        break;
+      }
+
+      case "SUGGEST_CONTENT": {
+        interaction.setMode("suggestion");
+        skipEpisodic = true;
+        skipPersonality = true;
+
+        // Capture screen for context
+        const { captureScreen } = require("./screenCapture");
+        const { runOCR } = require("./ocrRunner");
+        const { classifyScreen } = require("./screenClassifier");
+
+        let screenOCR = "";
+        let screenType = "unknown";
+
+        try {
+          const cap = await captureScreen();
+          if (cap) {
+            screenOCR = await runOCR(cap.imagePath);
+            screenType = classifyScreen(screenOCR);
+          }
+        } catch { /* ignore capture failures */ }
+
+        const suggestResult = await suggestContent({
+          screenText: screenOCR,
+          screenType,
+          userInstruction: intentObj.rawText
+        });
+
+        if (suggestResult.suggestions.length > 0) {
+          // Store suggestions for follow-up confirmation
+          setPendingSuggestion({
+            suggestions: suggestResult.suggestions,
+            screenType
+          });
+        }
+
+        reply = suggestResult.response;
+        interaction.resetMode();
+        break;
+      }
+
       case "CONFIRM_YES":
       case "CONFIRM_NO": {
+        // ---- Check pending suggestion first ----
+        const pendingSug = getPendingSuggestion();
+        const rawNum = cleanRawText.trim();
+
+        if (pendingSug && /^[1-3]$/.test(rawNum)) {
+          const idx = parseInt(rawNum, 10) - 1;
+          const chosen = pendingSug.suggestions[idx];
+          clearPendingSuggestion();
+
+          if (chosen) {
+            // Type the chosen suggestion using desktop tool
+            const { executeTool } = require("./tools/toolRegistry");
+            await executeTool({
+              tool: "desktop",
+              action: "type",
+              params: { text: chosen }
+            });
+            reply = `Typed: "${chosen}"`;
+          } else {
+            reply = "That option wasn't found. Try 1, 2, 3, or 'none' to cancel.";
+          }
+          skipEpisodic = true;
+          skipPersonality = true;
+          break;
+        }
+
+        if (pendingSug && /^none$/i.test(rawNum)) {
+          clearPendingSuggestion();
+          reply = "Suggestion cancelled.";
+          skipEpisodic = true;
+          skipPersonality = true;
+          break;
+        }
+
+        // ---- Normal confirmation flow ----
         const pending = getConfirmation();
 
         if (!pending) {
@@ -945,28 +1364,11 @@ if (
 
         /* ===== If execution successful → generate natural confirmation ===== */
 
-        const confirmationPrompt = `
-        The following system action has already been successfully executed:
-
-        Goal: ${plan.goal}
-
-        Respond naturally in 1 short sentence confirming the action.
-        Do NOT say you are about to do it.
-        Do NOT say "I will".
-        Do NOT explain.
-        Just confirm it naturally.
-        `;
-
-        reply = await runLLM({
-          model: "llama3",
-          prompt: confirmationPrompt,
-          timeout: 20000
-        });
-
-        if (!reply) {
+        if (plan.goal && plan.goal !== "unclear") {
+          reply = `Action completed: ${plan.goal}`;
+        } else {
           reply = "Action completed successfully.";
         }
-
         break;
       }
 
@@ -998,10 +1400,12 @@ if (
     intentObj.intent === "SMALLTALK";
 
   if (conversational) {
+    const themedKey = extractKey(cleanRawText);
     await episodicMemory.store({
       type: "conversation",
       subject: "user",
-      key: extractKey(cleanRawText),   // 🔥 ADD THIS
+      // 🚫 "general" is noise — never let it become a dominant theme key
+      key: themedKey !== "general" ? themedKey : null,
       value: cleanRawText,
       source: "user",
       importance: emotional ? 0.75 : 0.6
@@ -1031,9 +1435,10 @@ if (
     });
   }
 
-  /* ---------- REFLECTION ---------- */
+  /* ---------- REFLECTION (FIRE-AND-FORGET) ---------- */
 
-  try { await maybeRunReflection("user"); } catch {}
+  // 🔥 NEVER await — Mistral runs in background, response is immediate
+  setImmediate(() => maybeRunReflection("user").catch(() => {}));
   res.json({ reply });
 });
 
@@ -1043,6 +1448,11 @@ if (
 app.listen(3000, () => {
   console.log("Arvsal backend running on http://localhost:3000");
 });
+
+process.on("exit", cleanupAll);
+process.on("SIGINT", cleanupAll);
+process.on("SIGTERM", cleanupAll);
+process.on("uncaughtException", cleanupAll);
 
 
 /* ================= WHATSAPP AUTOMATION ================= */
@@ -1164,7 +1574,7 @@ async function startTelegramListener() {
               try {
                   const finalPath = await conversionEngine.finalize(chatId, pdfName);
                   await sendTelegramDocument(finalPath);
-                  if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath);
+                  setTimeout(() => safeDelete(finalPath), 1500);
                   delete userState[chatId];
                   await sendTelegramMessage("✅ Project complete. Workspace purged.");
               } catch (err) {
@@ -1217,17 +1627,16 @@ async function startTelegramListener() {
           }
 
           if (fileId) {
-            if (userState[chatId]?.step === "COLLECTING") {
-                const fileBuffer = await downloadTelegramFileToBuffer(fileId);
-                if (fileBuffer) { // 🔥 Only add if download was successful
-                    await conversionEngine.addFile(chatId, fileName, fileBuffer);
-                    console.log(`📎 Added to batch: ${fileName}`);
-                } else {
-                    await sendTelegramMessage(`⚠️ Failed to download ${fileName}. Skipping.`);
-                }
-            } else {
-                // ... your standard logic
-            }
+              if (userState[chatId]?.step === "COLLECTING") {
+                  const fileBuffer = await downloadTelegramFileToBuffer(fileId);
+                  if (fileBuffer) {
+                      // 🔥 CHANGE: Pass messageObj.message_id as the 4th argument
+                      await conversionEngine.addFile(chatId, fileName, fileBuffer, messageObj.message_id);
+                      console.log(`📎 Added to batch (ID: ${messageObj.message_id}): ${fileName}`);
+                  } else {
+                      await sendTelegramMessage(`⚠️ Failed to download ${fileName}. Skipping.`);
+                  }
+              }
           }
 
         }
@@ -1242,15 +1651,6 @@ async function startTelegramListener() {
 
 
 startTelegramListener();
-
-
-
-
-
-
-
-
-
 
 
 
@@ -1315,6 +1715,17 @@ startTelegramListener();
 //   clearConfirmation
 // } = require("./confirmManager");
 
+// /* ================= PENDING SUGGESTION STATE ================= */
+// // Manages "type 1/2/3 to confirm" flow for content suggestions
+
+// let _pendingSuggestion = null;
+// let streamBuffer = Buffer.alloc(0);
+
+// function setPendingSuggestion(data) { _pendingSuggestion = data; }
+// function getPendingSuggestion() { return _pendingSuggestion; }
+// function clearPendingSuggestion() { _pendingSuggestion = null; }
+
+
 // /* ================= BRAIN ================= */
 
 // const normalize = require("./normalizer");
@@ -1327,7 +1738,7 @@ startTelegramListener();
 // const { generatePlan } = require("./plannerEngine");
 // const { runLLM } = require("./llmRunner");
 // const { isActionIntent } = require("./actionIntentDetector");
-// const { sendTelegramMessage, fetchUpdates, sendTelegramDocument,downloadTelegramFile } = require("./telegramService");
+// const { sendTelegramMessage, fetchUpdates, sendTelegramDocument,downloadTelegramFile, downloadTelegramFileToBuffer } = require("./telegramService");
 // const { enableRemote, disableRemote, isRemoteEnabled } = require("./remoteControl");
 // const { verifyToken } = require("./totpManager");
 // const { searchFileByName } = require("./fileSearch");
@@ -1343,10 +1754,17 @@ startTelegramListener();
 // const { runOCR } = require("./ocrRunner");
 // const { isTextHeavy } = require("./visionAnalyzer");
 // const sharp = require("sharp");
-// const { safeDelete } = require("./fileCleanup");
+// const { createTempFile, safeDelete, cleanupAll } = require("./utils/safeTempManager");
+// const interaction = require("./agent/interactionModeManager");
 // const conversionEngine = require("./conversionEngine");
+// const { classifyScreen } = require("./screenClassifier");
 
 
+// /* ================= VISION-DRIVEN ACTION LAYER (NEW) ================= */
+
+// const { handleScreenAction } = require("./screenActionOrchestrator");
+// const { agentLoop } = require("./agent/agentLoop");
+// const { suggestContent } = require("./contentSuggester");
 
 // /* ================= REFLECTION ================= */
 
@@ -1420,10 +1838,8 @@ startTelegramListener();
 
 // async function analyzeScreen(prompt) {
 
-//   const ts = Date.now();
-
-//   const tempPath = `C:/Users/athar/AppData/Local/Temp/arvsal_${ts}.png`;
-//   const processedPath = `C:/Users/athar/AppData/Local/Temp/arvsal_${ts}_processed.png`;
+//   const tempPath = createTempFile("screen", ".png");
+//   const processedPath = createTempFile("screen_processed", ".png");
 
 //   let ocrText = "";
 //   let result;
@@ -1460,29 +1876,33 @@ startTelegramListener();
 
 //       console.log("FULL OCR LENGTH:", ocrText.length);
 //     }
+//     const screenType = classifyScreen(ocrText);
+//     console.log("SCREEN TYPE:", screenType);
 
 //     // ===== TEXT MODE =====
 //     if (isTextHeavy(ocrText)) {
 
 //       const textPrompt = `
-// You are performing technical screen analysis using raw OCR text.
+//       Screen context: ${screenType}
 
-// STRICT RULES:
-// - Use ONLY the extracted text below.
-// - Do NOT describe it as a screenshot.
-// - Do NOT speculate.
-// - Quote exact phrases.
-// - Be precise and technical.
+//       You are performing technical screen analysis using raw OCR text.
 
-// Extracted Text:
-// -------------------------
-// ${ocrText}
-// -------------------------
+//       STRICT RULES:
+//       - Use ONLY extracted text
+//       - Be precise
+//       - Adapt explanation to the screen context (${screenType})
+//       - Do NOT speculate
+//       - Quote exact phrases
 
-// User request:
-// ${prompt || "Analyze and explain clearly."}
-// `;
+//       Extracted Text:
+//       -------------------------
+//       ${ocrText}
+//       -------------------------
 
+//       User request:
+//       ${prompt || "Analyze and explain clearly."}
+//       `;
+      
 //       result = await llmRouter({
 //         intent: "GENERAL_QUESTION",
 //         text: textPrompt
@@ -1521,6 +1941,112 @@ startTelegramListener();
 
 // /* ================= AUDIO (WHISPER) ================= */
 
+// // app.post("/audio", async (req, res) => {
+// //   try {
+// //     if (!req.body || !req.body.length) {
+// //       return res.json({ error: "Empty audio buffer" });
+// //     }
+
+// //     const timestamp = Date.now();
+// //     const webmPath = path.join(__dirname, `temp_${timestamp}.webm`);
+// //     const wavPath = path.join(__dirname, `temp_${timestamp}.wav`);
+
+// //     // 1️⃣ Write the incoming buffer
+// //     fs.writeFileSync(webmPath, req.body);
+
+// //     // 2️⃣ Convert to 16kHz Mono WAV (Standard for whisper.cpp)
+// //     const ffmpegExe = "C:\\Users\\athar\\Downloads\\ffmpeg-8.0.1-essentials_build\\ffmpeg-8.0.1-essentials_build\\bin\\ffmpeg.exe";
+
+// //     await new Promise((resolve, reject) => {
+// //       const ff = spawn(ffmpegExe, [
+// //         "-y",
+// //         "-i", webmPath,
+// //         "-ar", "16000",
+// //         "-ac", "1",
+// //         wavPath
+// //       ]);
+// //       ff.on("close", code => code === 0 ? resolve() : reject(new Error("FFmpeg failed")));
+// //     });
+
+// //     // 3️⃣ Run the 3.1GB Large-v3 Model with "Hardened" Settings
+// //     const whisperExe = path.resolve(__dirname, "../whisper.cpp/build/bin/whisper-cli.exe");
+// //     const modelPath = "C:\\Users\\athar\\OneDrive\\Desktop\\arvsal\\whisper.cpp\\models\\ggml-large-v3.bin";
+
+// //     let output = "";
+    
+// //     // Using a specific prompt to anchor Marathi/Hindi translations
+// //     const internalPrompt = "Marathi and Hindi audio translated to English. Words like Mala, Sang, Tujha, Arvsal.";
+
+// //     const whisper = spawn(whisperExe, [
+// //       "-m", modelPath,
+// //       "-f", wavPath,
+// //       "-tr",              // 🚩 Translate to English
+// //       "-nt",              // 🚩 No timestamps
+// //       "-np",              // 🚩 No system logs in output
+// //       "-dev", "0",        // 🚩 Use RTX 4060 GPU
+// //       "-t", "8",          // 🚩 Use 8 CPU threads
+// //       "-tpi", "0.0",      // 🚩 Temperature 0: Maximum consistency (Stops hallucinations)
+// //       "-bs", "5",         // 🚩 Beam Size 5: High accuracy search for Marathi
+// //       "--prompt", internalPrompt
+// //     ]);
+
+// //     whisper.stdout.on("data", (d) => {
+// //       output += d.toString();
+// //     });
+
+// //     whisper.on("close", (code) => {
+// //       // Cleanup temporary files immediately
+// //       if (fs.existsSync(webmPath)) fs.unlinkSync(webmPath);
+// //       if (fs.existsSync(wavPath)) fs.unlinkSync(wavPath);
+
+// //       if (code !== 0) {
+// //         console.error("Whisper Error Code:", code);
+// //         return res.json({ error: "Whisper processing failed" });
+// //       }
+
+// //       // 4️⃣ Advanced Scrubber: Remove hallucinations and "Prompt Leaks"
+// //       let text = output.trim();
+      
+// //       // Words to remove if the model "repeats" your instructions
+// //       const promptLeaks = [
+// //         "marathi and hindi", 
+// //         "assistant context", 
+// //         "code-switching", 
+// //         "arvsal assistant",
+// //         "maladzau",
+// //         "jani di"
+// //       ];
+
+// //       promptLeaks.forEach(word => {
+// //         const regex = new RegExp(word, "gi");
+// //         text = text.replace(regex, "");
+// //       });
+
+// //       // Remove specific "Silent Room" tokens
+// //       text = text.replace(/\.|\-|_/g, "").trim();
+
+// //       // Hallucination Filter for short/nonsense words
+// //       const hallucinations = ["you", "thank you", "subtitles by", "watching"];
+// //       const lowerText = text.toLowerCase();
+      
+// //       if (!text || hallucinations.includes(lowerText) || text.length < 3) {
+// //         console.log("🤐 Silence/Hallucination discarded.");
+// //         return res.json({ text: "" }); 
+// //       }
+
+// //       console.log(`✅ Final Cleaned Translation: ${text}`);
+      
+// //       // Send back to your Electron frontend
+// //       res.json({ text });
+// //     });
+
+// //   } catch (err) {
+// //     console.error("CRITICAL SERVER ERROR:", err);
+// //     res.json({ error: "Audio processing failed", details: err.message });
+// //   }
+// // });
+
+
 // app.post("/audio",async (req, res) => {
 //     try {
 //       if (!req.body || !req.body.length) {
@@ -1528,8 +2054,8 @@ startTelegramListener();
 //       }
 
 //       const base = `arvsal_${Date.now()}`;
-//       const webmPath = path.join(os.tmpdir(), `${base}.webm`);
-//       const wavPath  = path.join(os.tmpdir(), `${base}.wav`);
+//       const webmPath = createTempFile("audio", ".webm");
+//       const wavPath  = createTempFile("audio", ".wav");
 
 //       // 1️⃣ write WEBM exactly as received
 //       fs.writeFileSync(webmPath, req.body);
@@ -1576,8 +2102,8 @@ startTelegramListener();
 //       whisper.stderr.on("data", () => {});
 
 //       whisper.on("close", () => {
-//         fs.unlinkSync(webmPath);
-//         fs.unlinkSync(wavPath);
+//         safeDelete(webmPath);
+//         safeDelete(wavPath);
 
 //         const text = output
 //           .split("\n")
@@ -1599,6 +2125,84 @@ startTelegramListener();
 //   }
 // );
 
+// app.post("/audio-stream", async (req, res) => {
+//   try {
+//     if (!req.body || !req.body.length) {
+//       return res.json({ text: "" });
+//     }
+
+//     // 🔥 Append incoming chunk
+//     streamBuffer = Buffer.concat([streamBuffer, req.body]);
+
+//     // 🔥 Keep only last ~3 seconds (avoid overload)
+//     if (streamBuffer.length > 200000) {
+//       streamBuffer = streamBuffer.slice(-200000);
+//     }
+
+//     const webmPath = createTempFile("stream", ".webm");
+//     const wavPath  = createTempFile("stream", ".wav");
+
+//     fs.writeFileSync(webmPath, streamBuffer);
+
+//     const ffmpegExe =
+//       "C:\\Users\\athar\\Downloads\\ffmpeg-8.0.1-essentials_build\\ffmpeg-8.0.1-essentials_build\\bin\\ffmpeg.exe";
+
+//     // 🔄 Convert to WAV
+//     await new Promise((resolve, reject) => {
+//       const ff = spawn(ffmpegExe, [
+//         "-y",
+//         "-i", webmPath,
+//         "-ar", "16000",
+//         "-ac", "1",
+//         wavPath
+//       ]);
+
+//       ff.on("close", code => {
+//         code === 0 ? resolve() : reject();
+//       });
+//     });
+
+//     const whisperExe = path.resolve(
+//       __dirname,
+//       "../whisper.cpp/build/bin/whisper-cli.exe"
+//     );
+
+//     const modelPath = path.resolve(
+//       __dirname,
+//       "../whisper.cpp/models/ggml-small.en.bin"
+//     );
+
+//     let output = "";
+
+//     const whisper = spawn(whisperExe, [
+//       "-m", modelPath,
+//       "-f", wavPath,
+//       "-nt"
+//     ]);
+
+//     whisper.stdout.on("data", d => {
+//       output += d.toString();
+//     });
+
+//     whisper.on("close", () => {
+//       safeDelete(webmPath);
+//       safeDelete(wavPath);
+
+//       const text = output
+//         .split("\n")
+//         .map(l => l.replace(/^.*\]\s*/, ""))
+//         .join(" ")
+//         .trim();
+
+//       res.json({ text });
+//     });
+
+//   } catch (err) {
+//     res.json({ text: "" });
+//   }
+// });
+
+
 // /* ================= TTS (PIPER) ================= */
 
 // app.post("/speak", async (req, res) => {
@@ -1609,7 +2213,7 @@ startTelegramListener();
 //     }
 
 //     const base = `arvsal_tts_${Date.now()}`;
-//     const wavPath = path.join(os.tmpdir(), `${base}.wav`);
+//     const wavPath = createTempFile("tts", ".wav");
 
 //     const piperExe =
 //       "C:\\Users\\athar\\Downloads\\piper_windows_amd64\\piper\\piper.exe";
@@ -1627,7 +2231,7 @@ startTelegramListener();
 
 //     piper.on("close", () => {
 //       const audio = fs.readFileSync(wavPath);
-//       fs.unlinkSync(wavPath);
+//       safeDelete(wavPath);
 
 //       res.set("Content-Type", "audio/wav");
 //       res.send(audio);
@@ -1638,6 +2242,7 @@ startTelegramListener();
 //     res.status(500).json({ error: "TTS failed" });
 //   }
 // });
+
 // /* ================= COMMAND ENDPOINT ================= */
 
 // app.post("/command", async (req, res) => {
@@ -1827,13 +2432,14 @@ startTelegramListener();
 
 //   if (source === "telegram" && cleanRawText.toLowerCase().startsWith("screenshot")) {
 
-//     const tempPath = "C:/Users/athar/AppData/Local/Temp/arvsal_screenshot.png";
+//     const tempPath = createTempFile("telegram_screen", ".png");
 
 //     await screenshot({ filename: tempPath });
+//     await new Promise(r => setTimeout(r, 200));
 
 //     await sendTelegramDocument(tempPath);
 
-//     fs.unlinkSync(tempPath); // 🔥 delete after sending
+//     safeDelete(tempPath);
 
 //     return res.json({ reply: "Screenshot sent and deleted locally." });
 //   }
@@ -1904,7 +2510,42 @@ startTelegramListener();
 //     return res.json({ reply });
 //   }
 
-//   /* ---------- DETERMINISTIC INTENTS (NO LLM EVER) ---------- */
+//   /* ---------- PENDING SUGGESTION (1/2/3/none) ---------- */
+
+//   const _pendingSug = getPendingSuggestion();
+//   if (_pendingSug) {
+//     const rawNum = cleanRawText.trim();
+
+//     if (/^[1-3]$/.test(rawNum)) {
+//       const idx = parseInt(rawNum, 10) - 1;
+//       const chosen = _pendingSug.suggestions[idx];
+//       clearPendingSuggestion();
+
+//       if (chosen) {
+//         const { executeTool } = require("./tools/toolRegistry");
+//         await executeTool({
+//           tool: "desktop",
+//           action: "type",
+//           params: { text: chosen }
+//         });
+//         const reply = `Typed: "${chosen}"`;
+//         chatHistory.addMessage("arvsal", reply);
+//         return res.json({ reply });
+//       } else {
+//         const reply = "That option wasn't found. Try 1, 2, or 3.";
+//         chatHistory.addMessage("arvsal", reply);
+//         return res.json({ reply });
+//       }
+//     }
+
+//     if (/^none$/i.test(rawNum)) {
+//       clearPendingSuggestion();
+//       const reply = "Suggestion cancelled.";
+//       chatHistory.addMessage("arvsal", reply);
+//       return res.json({ reply });
+//     }
+//   }
+
 
 //   if ([
 //     "INTRODUCE_SELF",
@@ -2124,8 +2765,129 @@ startTelegramListener();
 //         break;
 
 //       /* ===== GENERATIVE (LAST) ===== */
+
+//       /* ===== SCREEN ACTION (Vision Automation Layer) ===== */
+
+//       case "SCREEN_ACTION": {
+//         interaction.setMode("action");
+//         skipEpisodic = true;
+//         skipPersonality = true;
+
+//         const actionResult = await agentLoop(intentObj.rawText);
+
+//         if (actionResult.needsClarification) {
+//           // Ask user before doing anything
+//           reply = actionResult.question;
+//           skipEpisodic = true;
+//         } else {
+//           reply = actionResult.response;
+//         }
+//         interaction.resetMode();
+//         break;
+//       }
+
+//       case "SCREEN_ACTION_MIXED": {
+//         interaction.setMode("mixed");
+//         // Mixed: chat response + screen action in parallel
+//         skipEpisodic = false;
+//         skipPersonality = false;
+
+//         const [chatReply, actionResult] = await Promise.all([
+//           llmRouter({ intent: "GENERAL_QUESTION", text: intentObj.rawText }),
+//           handleScreenAction(intentObj.rawText)
+//         ]);
+
+//         if (actionResult.needsClarification) {
+//           // If action needs info, prioritize asking over chat
+//           reply = actionResult.question;
+//           skipEpisodic = true;
+//         } else {
+//           const actionSummary = actionResult.success
+//             ? `\n\n✅ ${actionResult.response}`
+//             : `\n\n⚠️ ${actionResult.response}`;
+//           reply = (chatReply || "") + actionSummary;
+//         }
+//         interaction.resetMode();
+//         break;
+//       }
+
+//       case "SUGGEST_CONTENT": {
+//         interaction.setMode("suggestion");
+//         skipEpisodic = true;
+//         skipPersonality = true;
+
+//         // Capture screen for context
+//         const { captureScreen } = require("./screenCapture");
+//         const { runOCR } = require("./ocrRunner");
+//         const { classifyScreen } = require("./screenClassifier");
+
+//         let screenOCR = "";
+//         let screenType = "unknown";
+
+//         try {
+//           const cap = await captureScreen();
+//           if (cap) {
+//             screenOCR = await runOCR(cap.imagePath);
+//             screenType = classifyScreen(screenOCR);
+//           }
+//         } catch { /* ignore capture failures */ }
+
+//         const suggestResult = await suggestContent({
+//           screenText: screenOCR,
+//           screenType,
+//           userInstruction: intentObj.rawText
+//         });
+
+//         if (suggestResult.suggestions.length > 0) {
+//           // Store suggestions for follow-up confirmation
+//           setPendingSuggestion({
+//             suggestions: suggestResult.suggestions,
+//             screenType
+//           });
+//         }
+
+//         reply = suggestResult.response;
+//         interaction.resetMode();
+//         break;
+//       }
+
 //       case "CONFIRM_YES":
 //       case "CONFIRM_NO": {
+//         // ---- Check pending suggestion first ----
+//         const pendingSug = getPendingSuggestion();
+//         const rawNum = cleanRawText.trim();
+
+//         if (pendingSug && /^[1-3]$/.test(rawNum)) {
+//           const idx = parseInt(rawNum, 10) - 1;
+//           const chosen = pendingSug.suggestions[idx];
+//           clearPendingSuggestion();
+
+//           if (chosen) {
+//             // Type the chosen suggestion using desktop tool
+//             const { executeTool } = require("./tools/toolRegistry");
+//             await executeTool({
+//               tool: "desktop",
+//               action: "type",
+//               params: { text: chosen }
+//             });
+//             reply = `Typed: "${chosen}"`;
+//           } else {
+//             reply = "That option wasn't found. Try 1, 2, 3, or 'none' to cancel.";
+//           }
+//           skipEpisodic = true;
+//           skipPersonality = true;
+//           break;
+//         }
+
+//         if (pendingSug && /^none$/i.test(rawNum)) {
+//           clearPendingSuggestion();
+//           reply = "Suggestion cancelled.";
+//           skipEpisodic = true;
+//           skipPersonality = true;
+//           break;
+//         }
+
+//         // ---- Normal confirmation flow ----
 //         const pending = getConfirmation();
 
 //         if (!pending) {
@@ -2221,28 +2983,11 @@ startTelegramListener();
 
 //         /* ===== If execution successful → generate natural confirmation ===== */
 
-//         const confirmationPrompt = `
-//         The following system action has already been successfully executed:
-
-//         Goal: ${plan.goal}
-
-//         Respond naturally in 1 short sentence confirming the action.
-//         Do NOT say you are about to do it.
-//         Do NOT say "I will".
-//         Do NOT explain.
-//         Just confirm it naturally.
-//         `;
-
-//         reply = await runLLM({
-//           model: "llama3",
-//           prompt: confirmationPrompt,
-//           timeout: 20000
-//         });
-
-//         if (!reply) {
+//         if (plan.goal && plan.goal !== "unclear") {
+//           reply = `Action completed: ${plan.goal}`;
+//         } else {
 //           reply = "Action completed successfully.";
 //         }
-
 //         break;
 //       }
 
@@ -2274,10 +3019,12 @@ startTelegramListener();
 //     intentObj.intent === "SMALLTALK";
 
 //   if (conversational) {
+//     const themedKey = extractKey(cleanRawText);
 //     await episodicMemory.store({
 //       type: "conversation",
 //       subject: "user",
-//       key: extractKey(cleanRawText),   // 🔥 ADD THIS
+//       // 🚫 "general" is noise — never let it become a dominant theme key
+//       key: themedKey !== "general" ? themedKey : null,
 //       value: cleanRawText,
 //       source: "user",
 //       importance: emotional ? 0.75 : 0.6
@@ -2307,9 +3054,10 @@ startTelegramListener();
 //     });
 //   }
 
-//   /* ---------- REFLECTION ---------- */
+//   /* ---------- REFLECTION (FIRE-AND-FORGET) ---------- */
 
-//   try { await maybeRunReflection("user"); } catch {}
+//   // 🔥 NEVER await — Mistral runs in background, response is immediate
+//   setImmediate(() => maybeRunReflection("user").catch(() => {}));
 //   res.json({ reply });
 // });
 
@@ -2319,6 +3067,11 @@ startTelegramListener();
 // app.listen(3000, () => {
 //   console.log("Arvsal backend running on http://localhost:3000");
 // });
+
+// process.on("exit", cleanupAll);
+// process.on("SIGINT", cleanupAll);
+// process.on("SIGTERM", cleanupAll);
+// process.on("uncaughtException", cleanupAll);
 
 
 // /* ================= WHATSAPP AUTOMATION ================= */
@@ -2398,6 +3151,8 @@ startTelegramListener();
 //   console.log("📡 Telegram listener started...");
 
 //   let offset = 0;
+//   // 🔥 Declared outside the loop so it remembers your progress
+//   let userState = {}; 
 
 //   while (true) {
 //     try {
@@ -2410,21 +3165,60 @@ startTelegramListener();
 //         if (!messageObj) continue;
 
 //         const chatId = messageObj.chat?.id;
-//         if (String(chatId) !== process.env.TELEGRAM_CHAT_ID) continue;
 
-//         /* ================= TEXT MESSAGE ================= */
+//         // 🔒 THE GATEKEEPER: Strictly only for your Telegram ID
+//         if (String(chatId) !== process.env.TELEGRAM_CHAT_ID) {
+//             console.log(`⚠️ Blocked unauthorized access from: ${chatId}`);
+//             continue;
+//         }
+
+//         /* ================= 1. TEXT MESSAGE HANDLING ================= */
 
 //         if (messageObj.text) {
 //           const raw = messageObj.text.trim();
 
-//           // 🔒 Require prefix
-//           if (!raw.toLowerCase().startsWith("@arvsal")) {
+//           // A. PDF Start Trigger
+//           if (raw.toLowerCase() === "@arvsal start pdf") {
+//             userState[chatId] = { mode: "PDF", step: "COLLECTING" };
+//             conversionEngine.startSession(chatId);
+//             await sendTelegramMessage("📥 A-Eye Batch Mode: ON. Send your mixed files. Type '@arvsal finish' when done.");
+//             continue; 
+//           }
+
+//           // B. Naming Step (The Final Hook)
+//           if (userState[chatId]?.step === "NAMING") {
+//               const pdfName = raw.replace("@arvsal", "").trim();
+//               await sendTelegramMessage(`⚙️ Finalizing ${pdfName}.pdf...`);
+              
+//               try {
+//                   const finalPath = await conversionEngine.finalize(chatId, pdfName);
+//                   await sendTelegramDocument(finalPath);
+//                   setTimeout(() => safeDelete(finalPath), 1500);
+//                   delete userState[chatId];
+//                   await sendTelegramMessage("✅ Project complete. Workspace purged.");
+//               } catch (err) {
+//                   await sendTelegramMessage("❌ Engine Error: " + err.message);
+//               }
+//               continue; // 🔥 USE CONTINUE INSTEAD OF RETURN
+//           }
+
+
+
+//           // C. PDF Finish Trigger
+//           if (raw.toLowerCase() === "@arvsal finish") {
+//             if (userState[chatId]) {
+//               userState[chatId].step = "NAMING";
+//               await sendTelegramMessage("📝 What shall we name this PDF, sir?");
+//             } else {
+//               await sendTelegramMessage("🚫 No active batch session found.");
+//             }
 //             continue;
 //           }
 
-//           // Remove prefix before sending to backend
-//           const message = raw.replace(/^@arvsal/i, "").trim();
+//           /* --- STANDARD COMMANDS (ONLY IF NO BATCH TRIGGERED) --- */
+//           if (!raw.toLowerCase().startsWith("@arvsal")) continue;
 
+//           const message = raw.replace(/^@arvsal/i, "").trim();
 //           console.log("📩 Telegram (validated):", message);
 
 //           const response = await axios.post(
@@ -2433,33 +3227,38 @@ startTelegramListener();
 //             { headers: { "x-source": "telegram" } }
 //           );
 
-//           const reply = response.data.reply;
-//           await sendTelegramMessage(reply);
+//           await sendTelegramMessage(response.data.reply);
 //         }
 
-//         /* ================= FILE MESSAGE ================= */
+//         /* ================= 2. FILE/PHOTO HANDLING ================= */
 
-//         else if (messageObj.document) {
-//           const fileId = messageObj.document.file_id;
-//           const fileName = messageObj.document.file_name;
+//         else if (messageObj.document || messageObj.photo) {
+//           let fileId = null;
+//           let fileName = null;
 
-//           console.log("📁 Telegram File:", fileName);
+//           if (messageObj.document) {
+//             fileId = messageObj.document.file_id;
+//             fileName = messageObj.document.file_name;
+//           } else if (messageObj.photo) {
+//             // Get highest resolution
+//             fileId = messageObj.photo[messageObj.photo.length - 1].file_id;
+//             fileName = `arvsal_img_${Date.now()}.jpg`;
+//           }
 
-//           await downloadTelegramFile(fileId, fileName);
+//           if (fileId) {
+//             if (userState[chatId]?.step === "COLLECTING") {
+//                 const fileBuffer = await downloadTelegramFileToBuffer(fileId);
+//                 if (fileBuffer) { // 🔥 Only add if download was successful
+//                     await conversionEngine.addFile(chatId, fileName, fileBuffer);
+//                     console.log(`📎 Added to batch: ${fileName}`);
+//                 } else {
+//                     await sendTelegramMessage(`⚠️ Failed to download ${fileName}. Skipping.`);
+//                 }
+//             } else {
+//                 // ... your standard logic
+//             }
+//           }
 
-//           await sendTelegramMessage("File received and saved successfully.");
-//         }
-
-//         /* ================= PHOTO MESSAGE ================= */
-
-//         else if (messageObj.photo) {
-//           const fileId = messageObj.photo[messageObj.photo.length - 1].file_id;
-
-//           console.log("📷 Telegram Photo received");
-
-//           await downloadTelegramFile(fileId, `photo_${Date.now()}.jpg`);
-
-//           await sendTelegramMessage("Photo received successfully.");
 //         }
 //       }
 
@@ -2470,37 +3269,7 @@ startTelegramListener();
 //   }
 // }
 
+
 // startTelegramListener();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 

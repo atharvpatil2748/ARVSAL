@@ -59,18 +59,24 @@ async function execute(actionObject) {
     if (action === "type") {
 
       const content = params.text || params.value;
+      const delay = Number(params.delay_ms) || 0;
 
       if (!content) {
         return { success: false, error: "Type requires value" };
       }
 
+      // 🔁 Optional delay before type
+      if (delay > 0) {
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+
       robot.typeString(content);
 
-      logExecution({ tool: "desktop", action, content });
+      logExecution({ tool: "desktop", action, content, delay_ms: delay });
 
       return {
         success: true,
-        message: "Typed successfully"
+        message: `Typed successfully after ${delay}ms delay`
       };
     }
 
@@ -127,7 +133,9 @@ async function execute(actionObject) {
         return { success: false, error: "Click requires x and y coordinates" };
       }
 
-      robot.moveMouseSmooth(x, y);
+      console.log("🔥 CLICK FINAL", { x, y });
+
+      robot.moveMouseSmooth(Math.round(x), Math.round(y));
       robot.mouseClick(button);
 
       logExecution({ tool: "desktop", action, x, y, button });

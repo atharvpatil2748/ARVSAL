@@ -38,7 +38,7 @@ function scoreImportance({
 
     /* ================= BASELINE ================= */
 
-    let score = 0.4;
+    let score = 0.35;
 
     /* ================= KEY-BASED SIGNALS ================= */
 
@@ -55,13 +55,16 @@ function scoreImportance({
     /* ================= CONTENT SIGNALS ================= */
 
     if (v.length > 0) {
-      // Emotional / personal topics
-      if (/love|emotion|feel|family|friend|relationship|health/i.test(v)) {
-        score += 0.2;
+      // Emotional / personal topics — only for statements, NOT questions
+      if (
+        /love|emotion|feel|family|friend|relationship|health/i.test(v) &&
+        !v.trim().endsWith("?")
+      ) {
+        score += 0.15;
       }
 
-      // Natural-language length (not junk)
-      if (v.length > 40 && /\s/.test(v)) {
+      // Natural-language length (not junk) — raised threshold to 60 chars
+      if (v.length > 60 && /\s/.test(v)) {
         score += 0.1;
       }
     }

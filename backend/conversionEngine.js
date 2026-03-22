@@ -20,40 +20,45 @@ class ConversionEngine {
         return workspace;
     }
 
-    async addFile(sessionId, fileName, buffer) {
+    async addFile(sessionId, fileName, buffer, messageId) {
         if (!this.sessions[sessionId]) return;
         const filePath = path.join(this.sessions[sessionId].path, fileName);
         fs.writeFileSync(filePath, buffer);
-        this.sessions[sessionId].files.push(filePath);
+        
+        // 🔥 Store as an object with the messageId for sorting
+        this.sessions[sessionId].files.push({
+            path: filePath,
+            messageId: messageId || 0
+        });
     }
 
     async finalize(sessionId, customName) {
         const session = this.sessions[sessionId];
         if (!session) throw new Error("No active session.");
 
+        // 🔥 SORTING LOGIC: Ensure files are in the order they were sent
+        session.files.sort((a, b) => a.messageId - b.messageId);
+
         const merger = new PDFMerger();
-        // Ensure the filename has .pdf
         const finalPdfName = customName.toLowerCase().endsWith(".pdf") ? customName : `${customName}.pdf`;
         const finalPdfPath = path.join(os.tmpdir(), finalPdfName);
 
-        for (const filePath of session.files) {
+        // 🔥 Loop through the sorted objects
+        for (const fileObj of session.files) {
+            const filePath = fileObj.path;
             const ext = path.extname(filePath).toLowerCase();
             let pdfToMerge = null;
 
-            // 1. Convert Images
             if ([".jpg", ".jpeg", ".png"].includes(ext)) {
                 pdfToMerge = await this.imageToPdf(filePath);
             } 
-            // 2. Convert Office Docs
             else if ([".docx", ".xlsx", ".txt", ".pptx"].includes(ext)) {
                 pdfToMerge = await this.officeToPdf(filePath);
             }
-            // 3. Handle existing PDFs 🔥 (NEW LOGIC)
             else if (ext === ".pdf") {
                 pdfToMerge = filePath;
             }
 
-            // Add to Merger
             if (pdfToMerge && fs.existsSync(pdfToMerge)) {
                 await merger.add(pdfToMerge);
             }

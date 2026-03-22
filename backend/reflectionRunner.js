@@ -1,12 +1,13 @@
 /**
  * Reflection Runner
  *
- * - Async
+ * - Async, fully FIRE-AND-FORGET
+ * - Per-theme cooldown (not per-subject)
+ * - Minimum-turns guard before re-triggering
+ * - Detached IIFE: can NEVER block a response
  * - Fail-safe
- * - No replies
- * - No side effects on main flow
  *
- * Phase 3 COMPLETE (HARDENED)
+ * Phase 3 HARDENED + Phase 9 Non-Blocking Fix
  */
 
 const { shouldTriggerReflection } = require("./reflectionTrigger");
@@ -14,21 +15,74 @@ const { generateReflection } = require("./reflectionGenerator");
 const reflectionMemory = require("./reflectionMemory");
 
 
-/* ================= COOLDOWN ================= */
+/* ================= CONFIG ================= */
 
-// Prevent reflection spam per subject
-const REFLECTION_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
-const lastRun = new Map();
+// 30 minutes per theme (not per subject)
+const REFLECTION_COOLDOWN_MS = 30 * 60 * 1000;
+
+// Minimum new conversational turns required since last reflection
+const MIN_TURNS_SINCE_LAST = 8;
 
 
-function canRun(subject) {
+/* ================= STATE ================= */
+
+// Map<themeHash, timestamp> — keyed by dominant theme set, NOT just subject
+const cooldownMap = new Map();
+
+// Map<subject, turnCount> — tracks new turns since last reflection
+const turnsSinceReflection = new Map();
+
+// Map<subject, totalTurns> — used to compute delta
+const lastReflectedAt = new Map();
+
+
+/* ================= TURN TRACKING ================= */
+
+/**
+ * Call this on every new conversational event so we can
+ * enforce the minimum-turns gate.
+ * @param {string} subject
+ */
+function recordTurn(subject = "user") {
+  subject = String(subject).toLowerCase().trim();
+  const current = turnsSinceReflection.get(subject) || 0;
+  turnsSinceReflection.set(subject, current + 1);
+}
+
+
+/* ================= THEME HASH ================= */
+
+function themeHash(subject, dominantKeys = []) {
+  const sorted = [...dominantKeys].sort().join("|");
+  return `${String(subject).toLowerCase().trim()}::${sorted}`;
+}
+
+
+/* ================= COOLDOWN CHECK ================= */
+
+function canRunTheme(subject, dominantKeys) {
+  const hash = themeHash(subject, dominantKeys);
   const now = Date.now();
-  const last = lastRun.get(subject);
+  const last = cooldownMap.get(hash);
+
   if (last && now - last < REFLECTION_COOLDOWN_MS) {
     return false;
   }
-  lastRun.set(subject, now);
+
+  cooldownMap.set(hash, now);
   return true;
+}
+
+
+/* ================= TURN GATE ================= */
+
+function hasEnoughNewTurns(subject) {
+  const turns = turnsSinceReflection.get(subject) || 0;
+  return turns >= MIN_TURNS_SINCE_LAST;
+}
+
+function resetTurns(subject) {
+  turnsSinceReflection.set(subject, 0);
 }
 
 
@@ -45,26 +99,22 @@ function isValidSignal(signal) {
 }
 
 
-/* ================= MAIN ================= */
+/* ================= DETACHED RUNNER ================= */
 
 /**
- * Decide + generate + store reflection
- * @param {string} subject
+ * Internal async work — runs in a detached IIFE.
+ * Will NEVER propagate latency to the caller.
  */
-async function maybeRunReflection(subject = "user") {
-  const reflection = await generateReflection(signal);
-
-  console.log("Generated reflection:", reflection);
+async function _runReflectionWork(subject, signal) {
   try {
-    if (!canRun(subject)) return;
-
-    const signal = shouldTriggerReflection(subject);
-    if (!isValidSignal(signal)) return;
+    if (!canRunTheme(subject, signal.dominantKeys)) return;
 
     const reflection = await generateReflection(signal);
     if (!reflection || typeof reflection.summary !== "string") return;
 
-    // Store primary insight (backward compatible)
+    console.log("[Reflection] Generated:", reflection.summary);
+
+    // Store primary insight
     reflectionMemory.addReflection({
       subject: reflection.subject || subject,
       insight: reflection.summary,
@@ -73,7 +123,7 @@ async function maybeRunReflection(subject = "user") {
       source: "reflection-engine"
     });
 
-    // 🔒 Optional: store individual insights as weaker reflections
+    // Store individual insights as weaker reflections
     if (Array.isArray(reflection.insights)) {
       for (const insight of reflection.insights) {
         if (typeof insight === "string" && insight.length > 10) {
@@ -88,10 +138,48 @@ async function maybeRunReflection(subject = "user") {
       }
     }
 
+    // Reset turn count after a successful reflection
+    resetTurns(subject);
+
   } catch {
-    // 🔒 ABSOLUTE FAIL-SAFE — never break main flow
+    // 🔒 ABSOLUTE FAIL-SAFE — never crash anything
   }
 }
 
 
-module.exports = { maybeRunReflection };
+/* ================= PUBLIC API ================= */
+
+/**
+ * Decide + generate + store reflection.
+ * ALWAYS fire-and-forget: caller MUST NOT await this.
+ * @param {string} subject
+ */
+async function maybeRunReflection(subject = "user") {
+  try {
+    subject = String(subject).toLowerCase().trim();
+
+    // Count this call as a new turn regardless
+    recordTurn(subject);
+
+    // Gate 1: Not enough new turns since last reflection
+    if (!hasEnoughNewTurns(subject)) return;
+
+    // Gate 2: Check if trigger conditions are met
+    const signal = shouldTriggerReflection(subject);
+    if (!isValidSignal(signal)) return;
+
+    // Gate 3: Per-theme cooldown (checked INSIDE detached work
+    // so we record the timestamp at execution time, not scheduling time)
+
+    // 🔥 DETACHED — run in background, never block the caller
+    setImmediate(() => {
+      _runReflectionWork(subject, signal).catch(() => { });
+    });
+
+  } catch {
+    // 🔒 ABSOLUTE FAIL-SAFE
+  }
+}
+
+
+module.exports = { maybeRunReflection, recordTurn };

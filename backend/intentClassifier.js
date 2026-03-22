@@ -6,9 +6,11 @@
  * NO hallucinated intent jumps
  * ALL original intents preserved
  * New features added safely
+ * SCREEN_ACTION + SUGGEST_CONTENT added (vision automation layer)
  */
 
 const { resolveDateRange } = require("./dateResolver");
+const { classifyScreenIntent } = require("./actionIntentDetector");
 
 function classifyIntent(input) {
   let original = "";
@@ -92,7 +94,7 @@ function classifyIntent(input) {
 
   /* ================= TIME / DATE ================= */
 
-// ===== TIME (QUESTION ONLY) =====
+  // ===== TIME (QUESTION ONLY) =====
   if (
     /^(what('?s)?|tell me|current)\s+time\b/i.test(lower) ||
     /\bwhat time is it\b/i.test(lower) ||
@@ -105,7 +107,7 @@ function classifyIntent(input) {
     };
   }
 
-// ===== DATE (QUESTION ONLY) =====
+  // ===== DATE (QUESTION ONLY) =====
   if (
     /^(what('?s)?|tell me|current)\s+date\b/i.test(lower) ||
     /\btoday('?s)? date\b/i.test(lower)
@@ -116,10 +118,10 @@ function classifyIntent(input) {
       rawText: original
     };
   }
-    
-    /* ================= WEATHER / NEWS (STRICT) ================= */
 
-// ===== WEATHER (STRICT QUESTION-ONLY) =====
+  /* ================= WEATHER / NEWS (STRICT) ================= */
+
+  // ===== WEATHER (STRICT QUESTION-ONLY) =====
   if (/\b(weather|temperature|forecast)\b/i.test(lower)) {
     let city = null;
 
@@ -147,7 +149,7 @@ function classifyIntent(input) {
     };
   }
 
-// ===== NEWS (QUESTION-ONLY) =====
+  // ===== NEWS (QUESTION-ONLY) =====
   if (
     /\b(news|headlines)\b/i.test(lower) &&
     /\b(what|tell|today|latest|current|did you hear)\b/i.test(lower)
@@ -175,22 +177,22 @@ function classifyIntent(input) {
   }
 
 
-/* ================= EPISODIC MEMORY (DETERMINISTIC) ================= */
+  /* ================= EPISODIC MEMORY (DETERMINISTIC) ================= */
 
-const range = resolveDateRange(lower);
+  const range = resolveDateRange(lower);
 
-// Added ^ at the start to ensure it only matches the beginning of the sentence
-const isPastQuery =
-  /^(what happened|what did i say|what did we talk|what do you remember|what i said)\b/i.test(lower);
+  // Added ^ at the start to ensure it only matches the beginning of the sentence
+  const isPastQuery =
+    /^(what happened|what did i say|what did we talk|what do you remember|what i said)\b/i.test(lower);
 
-if (range && isPastQuery) {
-  return { intent: "EPISODIC_BY_DATE", rawText: original };
-}
+  if (range && isPastQuery) {
+    return { intent: "EPISODIC_BY_DATE", rawText: original };
+  }
 
-if (isPastQuery) {
-  return { intent: "EPISODIC_RECALL", rawText: original };
-}
-/* ================= MEMORY SUMMARY ================= */
+  if (isPastQuery) {
+    return { intent: "EPISODIC_RECALL", rawText: original };
+  }
+  /* ================= MEMORY SUMMARY ================= */
 
   if (
     lower === "what do you know about me" ||
@@ -238,6 +240,26 @@ if (isPastQuery) {
       value = value.replace(/[.,!?]+$/, "").trim();
       if (/^my name$/i.test(key)) key = "name";
       return { intent: "REMEMBER", key, value, rawText: original };
+    }
+  }
+
+  /* ================= SCREEN ACTION (vision automation layer) — CHECK BEFORE RECALL ================= */
+  // IMPORTANT: Must run before the broad "what is" MEMORY READ block below,
+  // so commands like "type hello in the input box" aren't misrouted to RECALL.
+
+  if (/suggest (a |some )?(reply|response|message|content|something)/i.test(lower) ||
+    /write something (for|here|in)/i.test(lower) ||
+    /improve this (text|message|email)/i.test(lower)) {
+    return { intent: "SUGGEST_CONTENT", rawText: original };
+  }
+
+  {
+    const screenIntentEarly = classifyScreenIntent(original);
+    if (screenIntentEarly.type === "screen_action") {
+      return { intent: "SCREEN_ACTION", rawText: original };
+    }
+    if (screenIntentEarly.type === "mixed") {
+      return { intent: "SCREEN_ACTION_MIXED", rawText: original };
     }
   }
 
@@ -295,7 +317,7 @@ if (isPastQuery) {
   if (/^open notepad$/i.test(lower)) return { intent: "OPEN_APP", app: "notepad", rawText: original };
   if (/^open calculator$/i.test(lower)) return { intent: "OPEN_APP", app: "calculator", rawText: original };
   if (/^open calendar$/i.test(lower)) return { intent: "OPEN_CALENDAR", rawText: original };
-  if (/^open downloads$/i.test(lower))return { intent: "OPEN_FOLDER", path: "C:\\Users\\athar\\Downloads", rawText: original };
+  if (/^open downloads$/i.test(lower)) return { intent: "OPEN_FOLDER", path: "C:\\Users\\athar\\Downloads", rawText: original };
   if (/^open whatsapp$/i.test(lower)) return { intent: "OPEN_APP", app: "whatsapp", rawText: original };
   if (/^(shutdown|shut down)$/i.test(lower)) return { intent: "SHUTDOWN", rawText: original };
   if (/^restart$/i.test(lower)) return { intent: "RESTART", rawText: original };
@@ -310,6 +332,26 @@ if (isPastQuery) {
 
   if (["hi", "hello", "hey"].includes(lower)) {
     return { intent: "SMALLTALK", rawText: original };
+  }
+
+  /* ================= SCREEN ACTION (vision automation layer) ================= */
+  // NOTE: placed before GENERAL_QUESTION so screen commands are routed correctly.
+  // All existing specific intents above take priority.
+
+  // Suggestion commands (screen-driven, confirm before typing)
+  if (/suggest (a |some )?(reply|response|message|content|something)/i.test(lower) ||
+    /write something (for|here|in)/i.test(lower) ||
+    /improve this (text|message|email)/i.test(lower)) {
+    return { intent: "SUGGEST_CONTENT", rawText: original };
+  }
+
+  // Screen action or mixed
+  const screenIntent = classifyScreenIntent(original);
+  if (screenIntent.type === "screen_action") {
+    return { intent: "SCREEN_ACTION", rawText: original };
+  }
+  if (screenIntent.type === "mixed") {
+    return { intent: "SCREEN_ACTION_MIXED", rawText: original };
   }
 
   /* ================= DEFAULT ================= */

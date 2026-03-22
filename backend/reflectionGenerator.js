@@ -18,7 +18,7 @@ const { buildSystemPrompt } = require("./llmPrompt");
 /* ================= CONFIG ================= */
 
 const MODEL = "mistral:7b-instruct";
-const TIMEOUT_MS = 3500;
+const TIMEOUT_MS = 20000;
 
 
 /* ================= SAFE JSON ================= */

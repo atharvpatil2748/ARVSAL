@@ -5,11 +5,13 @@
  * - No retry storms
  * - Deterministic errors
  * - Router-safe
+ * - Vision support (askGeminiVision)
  */
 
 require("dotenv").config();
 
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+const fs = require("fs");
 
 /* ================= CONFIG ================= */
 
@@ -98,9 +100,73 @@ async function askGemini(prompt) {
   }
 }
 
+/* ================= VISION ================= */
+
+/**
+ * Ask Gemini with an image attached (for screen element finding, screen analysis).
+ *
+ * @param {{ imagePath: string, prompt: string }} opts
+ * @returns {Promise<string>}
+ */
+async function askGeminiVision({ imagePath, prompt }) {
+  if (!model) {
+    throw new GeminiUnavailableError("Gemini not initialized");
+  }
+
+  if (Date.now() - lastFailureAt < COOLDOWN_MS) {
+    throw new GeminiUnavailableError("Gemini cooldown active");
+  }
+
+  if (!imagePath || !fs.existsSync(imagePath)) {
+    throw new Error("[GeminiVision] Image file not found: " + imagePath);
+  }
+
+  try {
+    const imageData = fs.readFileSync(imagePath);
+    const base64Image = imageData.toString("base64");
+
+    const imagePart = {
+      inlineData: {
+        data: base64Image,
+        mimeType: "image/png"
+      }
+    };
+
+    const result = await model.generateContent([prompt, imagePart]);
+    const text = result?.response?.text?.();
+
+    if (!text || typeof text !== "string") {
+      throw new Error("Empty Gemini Vision response");
+    }
+
+    return text.trim();
+
+  } catch (err) {
+    lastFailureAt = Date.now();
+    const msg = String(err?.message || "").toLowerCase();
+
+    if (
+      err?.status === 429 ||
+      err?.status === 503 ||
+      msg.includes("quota") ||
+      msg.includes("rate") ||
+      msg.includes("overload")
+    ) {
+      throw new GeminiUnavailableError("Gemini Vision rate-limited or overloaded");
+    }
+
+    if (msg.includes("network") || msg.includes("fetch") || msg.includes("timeout")) {
+      throw new GeminiUnavailableError("Gemini Vision network error");
+    }
+
+    throw new GeminiUnavailableError("Gemini Vision unavailable: " + err?.message);
+  }
+}
+
 /* ================= EXPORT ================= */
 
 module.exports = {
   askGemini,
+  askGeminiVision,
   GeminiUnavailableError
 };

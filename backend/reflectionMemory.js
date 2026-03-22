@@ -12,7 +12,8 @@
 const fs = require("fs");
 const path = require("path");
 
-const FILE = path.join(process.cwd(), "reflection_memory.json");
+// const FILE = path.join(process.cwd(), "reflection_memory.json");
+const FILE = path.join(__dirname, "reflection_memory.json");
 
 
 /* ================= CONFIG ================= */
@@ -95,6 +96,7 @@ function addReflection({
   const cleanKeys = normalizeKeys(relatedKeys);
   const conf = clampConfidence(confidence);
 
+  // --- Exact-match reinforce ---
   const existing = reflections.find(r =>
     r.subject === subject &&
     normalizeInsight(r.insight) === normInsight
@@ -109,7 +111,16 @@ function addReflection({
     save();
     return;
   }
-  console.log("Reflection stored:", insight);
+
+  // --- 24-hour fingerprint dedup (catches near-duplicate LLM paraphrases) ---
+  const fingerprint = normInsight.slice(0, 60);
+  const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+  const recentDup = reflections.find(r =>
+    r.subject === subject &&
+    normalizeInsight(r.insight).slice(0, 60) === fingerprint &&
+    r.createdAt >= oneDayAgo
+  );
+  if (recentDup) return;
 
   const reflection = {
     id: `${now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -125,20 +136,20 @@ function addReflection({
 
   /* ===== VECTOR RAG INDEX (REFLECTION) ===== */
 
-const { embedText } = require("./embeddingModel");
-const { addVector } = require("./vectorStore");
+  const { embedText } = require("./embeddingModel");
+  const { addVector } = require("./vectorStore");
 
-embedText(cleanInsight).then(embedding => {
-  if (embedding) {
-    addVector({
-      embedding,
-      text: cleanInsight,
-      subject,
-      importance: conf,
-      timestamp: now()
-    });
-  }
-});
+  embedText(cleanInsight).then(embedding => {
+    if (embedding) {
+      addVector({
+        embedding,
+        text: cleanInsight,
+        subject,
+        importance: conf,
+        timestamp: now()
+      });
+    }
+  });
 
   reflections.push(reflection);
 

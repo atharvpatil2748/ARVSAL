@@ -15,9 +15,9 @@ const episodicMemory = require("./episodicMemory");
 
 /* ================= CONFIG ================= */
 
-const MIN_EVENTS_FOR_REFLECTION = 3;
-const MIN_IMPORTANCE_AVG = 0.58;
-const MIN_KEY_DOMINANCE = 2;
+const MIN_EVENTS_FOR_REFLECTION = 5;
+const MIN_IMPORTANCE_AVG = 0.65;
+const MIN_KEY_DOMINANCE = 3;
 
 
 /* ================= UTIL ================= */
@@ -77,12 +77,15 @@ function shouldTriggerReflection(subject = "user") {
   }
 
   const dominantKeys = Object.keys(keyCounts).filter(key => {
+    // 🚫 "general" is never a meaningful dominant theme
+    if (!key || key === "general") return false;
+
     const count = keyCounts[key];
     const avgKeyImportance = keyStats[key] / count;
 
     return (
-      count >= 3 &&                 // frequency threshold
-      avgKeyImportance >= 0.55      // quality threshold
+      count >= MIN_KEY_DOMINANCE &&   // frequency threshold (now 3)
+      avgKeyImportance >= 0.60        // raised quality threshold
     );
   });
 
