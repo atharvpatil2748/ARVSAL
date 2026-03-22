@@ -1,5 +1,365 @@
 <!DOCTYPE html>
 <html>
+
+<head>
+  <meta charset="UTF-8" />
+  <title>Arvsal</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial;
+      background: #0f172a;
+      color: #e5e7eb;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    #chat {
+      flex: 1;
+      padding: 16px;
+      overflow-y: auto;
+    }
+
+    #input {
+      display: flex;
+      padding: 10px;
+      border-top: 1px solid #334155;
+    }
+
+    input {
+      flex: 1;
+      padding: 10px;
+      background: #020617;
+      color: white;
+      border: 1px solid #334155;
+      outline: none;
+    }
+
+    button {
+      margin-left: 10px;
+      padding: 10px 16px;
+      background: #2563eb;
+      color: white;
+      border: none;
+      cursor: pointer;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div id="chat">
+    <h3>🧠 Arvsal is running</h3>
+  </div>
+
+  <div id="input">
+    <input id="command" placeholder="Type a command..." />
+    <button id="sendBtn">Send</button>
+    <button id="micBtn">🎤</button>
+  </div>
+
+  <script>
+
+    const chat = document.getElementById("chat");
+    const input = document.getElementById("command");
+    const sendBtn = document.getElementById("sendBtn");
+    const micBtn = document.getElementById("micBtn");
+
+    let mediaRecorder = null;
+    let audioChunks = [];
+    let streamChunks = [];
+    let micActive = false;
+    let ignoreInput = false;
+
+    let currentUserMessageId = null;
+    let messageCounter = 0;
+    let lastTranscript = "";
+
+    function createMessage(sender, text) {
+      const p = document.createElement("p");
+      p.id = `msg_${messageCounter++}`;
+      p.innerHTML = `<b>${sender}:</b> <span>${text}</span>`;
+      chat.appendChild(p);
+      chat.scrollTop = chat.scrollHeight;
+      return p.id;
+    }
+
+    function updateMessage(id, text) {
+      const p = document.getElementById(id);
+      if (p) {
+        p.querySelector("span").innerText = text;
+        chat.scrollTop = chat.scrollHeight;
+      }
+    }
+
+    function addMessage(sender, text) {
+      createMessage(sender, text);
+    }
+
+    sendBtn.onclick = () => {
+      const text = input.value.trim();
+      input.value = "";
+      if (text) handleText(text);
+    };
+
+    async function handleText(text) {
+      if (currentUserMessageId) {
+        updateMessage(currentUserMessageId, text);
+        currentUserMessageId = null;
+      } else {
+        addMessage("You", text);
+      }
+
+      const res = await window.arvsal.sendCommand(text);
+
+      if (!res?.reply) return;
+
+      addMessage("Arvsal", res.reply);
+
+      await speak(res.reply);
+
+      startMic(true);
+    }
+
+    async function speak(text) {
+      const audioBuffer = await window.arvsal.speak(text);
+      const blob = new Blob([audioBuffer], { type: "audio/wav" });
+      const url = URL.createObjectURL(blob);
+
+      return new Promise(resolve => {
+        const audio = new Audio(url);
+        audio.onended = () => {
+          URL.revokeObjectURL(url);
+          resolve();
+        };
+        audio.play();
+      });
+    }
+
+    async function startMic(isFollowUp = false) {
+
+      if (micActive) return;
+
+      micActive = true;
+      micBtn.textContent = "🎙️";
+
+      if (!isFollowUp) {
+        window.arvsal.stopWake();
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+
+      const audioContext = new AudioContext();
+      const source = audioContext.createMediaStreamSource(stream);
+      const analyser = audioContext.createAnalyser();
+
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = 0.8; // 🔥 IMPORTANT FIX
+
+      source.connect(analyser);
+
+      mediaRecorder = new MediaRecorder(stream, {
+        mimeType: "audio/webm;codecs=opus"
+      });
+
+      audioChunks = [];
+      streamChunks = [];
+
+      let hasSpoken = false;
+      let silenceTimer = null;
+      let noSpeechTimer = null;
+      let grace = true;
+      let isStreaming = false;
+      let speechStartTime = null;
+
+      setTimeout(() => grace = false, 800);
+
+      mediaRecorder.ondataavailable = async e => {
+        if (e.data.size > 0) {
+
+          audioChunks.push(e.data);
+
+          if (!ignoreInput) {
+
+            if (!currentUserMessageId) {
+              currentUserMessageId = createMessage("You", "...");
+            }
+
+            streamChunks.push(e.data);
+
+            if (streamChunks.length > 6) {
+              streamChunks.shift();
+            }
+
+            if (!isStreaming && audioChunks.length > 0) {
+              isStreaming = true;
+
+              const chunksToSend = [audioChunks[0]];
+              for (const chunk of streamChunks) {
+                if (chunk !== audioChunks[0]) chunksToSend.push(chunk);
+              }
+
+              const blob = new Blob(chunksToSend, { type: "audio/webm" });
+              const buffer = await blob.arrayBuffer();
+
+              try {
+                const res = await window.arvsal.streamAudio(buffer);
+                if (res?.text && currentUserMessageId) {
+                  const newText = res.text.trim();
+
+                  // 🔥 Enforce monotonic growth
+                  if (newText.length >= lastTranscript.length) {
+                    lastTranscript = newText;
+                    updateMessage(currentUserMessageId, lastTranscript);
+                  }
+                }
+              } finally {
+                isStreaming = false;
+              }
+            }
+          }
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+
+        micActive = false;
+        micBtn.textContent = "🎤";
+
+        stream.getTracks().forEach(t => t.stop());
+        clearTimeout(silenceTimer);
+        clearTimeout(noSpeechTimer);
+
+        if (audioChunks.length > 0) {
+          const blob = new Blob(audioChunks, { type: "audio/webm" });
+          const buffer = await blob.arrayBuffer();
+          const res = await window.arvsal.sendAudio(buffer);
+
+          if (res?.text) {
+            await handleText(res.text);
+            lastTranscript = "";
+            return;
+          } else {
+            if (currentUserMessageId) {
+              const el = document.getElementById(currentUserMessageId);
+              if (el) el.remove();
+              currentUserMessageId = null;
+            }
+            lastTranscript = "";
+          }
+        }
+
+        window.arvsal.resumeWake();
+      };
+
+      mediaRecorder.start(300);
+
+      const data = new Uint8Array(analyser.frequencyBinCount);
+
+      if (isFollowUp) {
+        noSpeechTimer = setTimeout(() => {
+          if (!hasSpoken && mediaRecorder.state === "recording") {
+            mediaRecorder.stop();
+          }
+        }, 5000);
+      }
+
+      const SILENCE_THRESHOLD = 0.012;
+      const SILENCE_DURATION = 1600;
+      const MIN_SPEECH_TIME = 700;
+
+      const detectSilence = () => {
+
+        analyser.getByteTimeDomainData(data);
+
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) {
+          const val = (data[i] - 128) / 128;
+          sum += val * val;
+        }
+
+        const rms = Math.sqrt(sum / data.length);
+
+        if (rms > 0.02) {
+          if (!hasSpoken) {
+            speechStartTime = Date.now();
+          }
+          hasSpoken = true;
+          clearTimeout(noSpeechTimer);
+        }
+
+        if (!grace && hasSpoken && rms < SILENCE_THRESHOLD) {
+
+          const speechDuration = Date.now() - (speechStartTime || Date.now());
+
+          if (speechDuration < MIN_SPEECH_TIME) {
+            clearTimeout(silenceTimer);
+            silenceTimer = null;
+          } else {
+            if (!silenceTimer) {
+              silenceTimer = setTimeout(() => {
+                if (mediaRecorder.state === "recording") {
+                  mediaRecorder.stop();
+                }
+              }, SILENCE_DURATION);
+            }
+          }
+
+        } else {
+          clearTimeout(silenceTimer);
+          silenceTimer = null;
+        }
+
+        if (mediaRecorder.state === "recording") {
+          requestAnimationFrame(detectSilence);
+        }
+      };
+
+      detectSilence();
+    }
+
+    micBtn.onclick = () => startMic(false);
+
+    window.arvsal.onWake(async () => {
+
+      if (micActive) return;
+
+      window.arvsal.stopWake();
+
+      startMic(false);
+
+      ignoreInput = true;
+
+      const audio = new Audio("yes_sir.wav");
+
+      audio.onended = () => {
+        ignoreInput = false;
+      };
+
+      audio.play();
+    });
+
+  </script>
+</body>
+
+</html>
+
+
+
+
+
+
+
+
+<!-- <!DOCTYPE html>
+<html>
 <head>
 <meta charset="UTF-8" />
 <title>Arvsal</title>
@@ -219,15 +579,4 @@ window.arvsal.onWake(async () => {
 
 </script>
 </body>
-</html>
-
-
-
-
-
-
-
-
-
-
-
+</html> -->
