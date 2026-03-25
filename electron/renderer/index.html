@@ -108,6 +108,37 @@
       createMessage(sender, text);
     }
 
+    function typeMessage(text, speed = 20) {
+      const id = createMessage("Arvsal", "");
+      let i = 0;
+
+      function type() {
+        if (i <= text.length) {
+          updateMessage(id, text.slice(0, i));
+          i++;
+          setTimeout(type, speed);
+        }
+      }
+
+      type();
+    }
+
+    function typeUserMessage(text, speed = 15) {
+      const id = createMessage("You", "");
+      let i = 0;
+
+      function type() {
+        if (i <= text.length) {
+          updateMessage(id, text.slice(0, i));
+          i++;
+          setTimeout(type, speed);
+        }
+      }
+
+      type();
+      return id;
+    }
+
     sendBtn.onclick = () => {
       const text = input.value.trim();
       input.value = "";
@@ -118,8 +149,7 @@
       setState("THINKING");
 
       if (currentUserMessageId) {
-        updateMessage(currentUserMessageId, text);
-        currentUserMessageId = null;
+        currentUserMessageId = null; // don't overwrite typed text
       } else {
         addMessage("You", text);
       }
@@ -132,10 +162,10 @@
         return;
       }
 
-      addMessage("Arvsal", res.reply);
+      typeMessage(res.reply);
 
       setState("SPEAKING");
-      await speak(res.reply);
+      await speakSmart(res.reply);
 
       setState("RESTARTING");
       startMic(true);
@@ -155,6 +185,96 @@
         audio.play();
       });
     }
+
+    /* ================= SMART SPEECH ENGINE ================= */
+
+    function smartSplit(text) {
+      const sentences =
+        text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [];
+
+      return sentences.map(s => s.trim());
+    }
+
+    const sentenceQueue = [];
+    const audioQueue = [];
+
+    let isSpeaking = false;
+    let ttsRunning = false;
+
+    /* 🔥 TTS WORKER */
+    async function ttsWorker() {
+      if (ttsRunning) return;
+      ttsRunning = true;
+
+      while (sentenceQueue.length > 0) {
+        const sentence = sentenceQueue.shift();
+
+        const audioBuffer = await window.arvsal.speak(sentence);
+
+        audioQueue.push(audioBuffer);
+
+        // 🔥 TRIGGER PLAYER WHEN FIRST AUDIO ARRIVES
+        playQueue();
+      }
+
+      ttsRunning = false;
+    }
+
+    /* 🔥 AUDIO PLAYER */
+    async function playQueue() {
+      if (isSpeaking) return;
+
+      isSpeaking = true;
+
+      while (audioQueue.length > 0) {
+        const buffer = audioQueue.shift();
+        await playAudio(buffer);
+      }
+
+      isSpeaking = false;
+    }
+
+    /* 🔥 AUDIO HELPER */
+    function playAudio(buffer) {
+      return new Promise(resolve => {
+        const blob = new Blob([buffer], { type: "audio/wav" });
+        const url = URL.createObjectURL(blob);
+
+        const audio = new Audio(url);
+
+        audio.onended = () => {
+          URL.revokeObjectURL(url);
+          resolve();
+        };
+
+        audio.play();
+      });
+    }
+
+    /* 🔥 MAIN ORCHESTRATOR */
+    async function speakSmart(text) {
+      const chunks = smartSplit(text);
+
+      sentenceQueue.push(...chunks);
+
+      ttsWorker();
+
+      // 🔥 WAIT until everything finishes
+      await waitForSpeechEnd();
+    }
+
+    function waitForSpeechEnd() {
+  return new Promise(resolve => {
+      const check = () => {
+        if (!ttsRunning && !isSpeaking && audioQueue.length === 0 && sentenceQueue.length === 0) {
+          resolve();
+        } else {
+          setTimeout(check, 100);
+        }
+      };
+        check();
+    });
+  }
 
     function mergeText(base, incoming) {
       if (!base) return incoming;
@@ -256,6 +376,16 @@
         lastSendTime = now;
 
         const float32 = event.inputBuffer.getChannelData(0);
+        let sum = 0;
+          for (let i = 0; i < float32.length; i++) {
+            sum += float32[i] * float32[i];
+          }
+        const rms = Math.sqrt(sum / float32.length);
+
+        // 🔥 NOISE GATE (REAL FIX)
+        if (rms < 0.015) {
+          return; // 🚫 do not send to backend
+        }
         const int16 = new Int16Array(float32.length);
         for (let i = 0; i < float32.length; i++) {
           int16[i] = Math.max(-1, Math.min(1, float32[i])) * 32767;
@@ -362,10 +492,11 @@
           pcmChunks.length = 0;
 
           if (finalText) {
-            if (currentUserMessageId) {
-              updateMessage(currentUserMessageId, finalText);
-            }
+            // 🔥 Show typing effect for user speech
+            currentUserMessageId = typeUserMessage(finalText);
+
             await handleText(finalText);
+
             streamBuffer = "";
             return;
           } else {
@@ -401,7 +532,7 @@
         }, 5000);
       }
 
-      const SILENCE_THRESHOLD = 0.012;
+      const SILENCE_THRESHOLD = 0.018;
       const SILENCE_DURATION = 1600;
       const MIN_SPEECH_TIME = 700;
 
@@ -475,6 +606,11 @@
 </body>
 
 </html>
+
+
+
+
+
 
 
 
