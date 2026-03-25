@@ -1,4 +1,3 @@
-
 /**
  * Arvsal Server
  * Deterministic-first command pipeline
@@ -83,6 +82,7 @@ const { createTempFile, safeDelete, cleanupAll } = require("./utils/safeTempMana
 const interaction = require("./agent/interactionModeManager");
 const conversionEngine = require("./conversionEngine");
 const { classifyScreen } = require("./screenClassifier");
+const { runFinalWhisper } = require("./whisperManager");
 
 
 /* ================= VISION-DRIVEN ACTION LAYER (NEW) ================= */
@@ -264,114 +264,6 @@ setInterval(() => {
   try { memory.decayConfidence(); } catch {}
 }, 6 * 60 * 60 * 1000);
 
-/* ================= AUDIO (WHISPER) ================= */
-
-// app.post("/audio", async (req, res) => {
-//   try {
-//     if (!req.body || !req.body.length) {
-//       return res.json({ error: "Empty audio buffer" });
-//     }
-
-//     const timestamp = Date.now();
-//     const webmPath = path.join(__dirname, `temp_${timestamp}.webm`);
-//     const wavPath = path.join(__dirname, `temp_${timestamp}.wav`);
-
-//     // 1️⃣ Write the incoming buffer
-//     fs.writeFileSync(webmPath, req.body);
-
-//     // 2️⃣ Convert to 16kHz Mono WAV (Standard for whisper.cpp)
-//     const ffmpegExe = "C:\\Users\\athar\\Downloads\\ffmpeg-8.0.1-essentials_build\\ffmpeg-8.0.1-essentials_build\\bin\\ffmpeg.exe";
-
-//     await new Promise((resolve, reject) => {
-//       const ff = spawn(ffmpegExe, [
-//         "-y",
-//         "-i", webmPath,
-//         "-ar", "16000",
-//         "-ac", "1",
-//         wavPath
-//       ]);
-//       ff.on("close", code => code === 0 ? resolve() : reject(new Error("FFmpeg failed")));
-//     });
-
-//     // 3️⃣ Run the 3.1GB Large-v3 Model with "Hardened" Settings
-//     const whisperExe = path.resolve(__dirname, "../whisper.cpp/build/bin/whisper-cli.exe");
-//     const modelPath = "C:\\Users\\athar\\OneDrive\\Desktop\\arvsal\\whisper.cpp\\models\\ggml-large-v3.bin";
-
-//     let output = "";
-    
-//     // Using a specific prompt to anchor Marathi/Hindi translations
-//     const internalPrompt = "Marathi and Hindi audio translated to English. Words like Mala, Sang, Tujha, Arvsal.";
-
-//     const whisper = spawn(whisperExe, [
-//       "-m", modelPath,
-//       "-f", wavPath,
-//       "-tr",              // 🚩 Translate to English
-//       "-nt",              // 🚩 No timestamps
-//       "-np",              // 🚩 No system logs in output
-//       "-dev", "0",        // 🚩 Use RTX 4060 GPU
-//       "-t", "8",          // 🚩 Use 8 CPU threads
-//       "-tpi", "0.0",      // 🚩 Temperature 0: Maximum consistency (Stops hallucinations)
-//       "-bs", "5",         // 🚩 Beam Size 5: High accuracy search for Marathi
-//       "--prompt", internalPrompt
-//     ]);
-
-//     whisper.stdout.on("data", (d) => {
-//       output += d.toString();
-//     });
-
-//     whisper.on("close", (code) => {
-//       // Cleanup temporary files immediately
-//       if (fs.existsSync(webmPath)) fs.unlinkSync(webmPath);
-//       if (fs.existsSync(wavPath)) fs.unlinkSync(wavPath);
-
-//       if (code !== 0) {
-//         console.error("Whisper Error Code:", code);
-//         return res.json({ error: "Whisper processing failed" });
-//       }
-
-//       // 4️⃣ Advanced Scrubber: Remove hallucinations and "Prompt Leaks"
-//       let text = output.trim();
-      
-//       // Words to remove if the model "repeats" your instructions
-//       const promptLeaks = [
-//         "marathi and hindi", 
-//         "assistant context", 
-//         "code-switching", 
-//         "arvsal assistant",
-//         "maladzau",
-//         "jani di"
-//       ];
-
-//       promptLeaks.forEach(word => {
-//         const regex = new RegExp(word, "gi");
-//         text = text.replace(regex, "");
-//       });
-
-//       // Remove specific "Silent Room" tokens
-//       text = text.replace(/\.|\-|_/g, "").trim();
-
-//       // Hallucination Filter for short/nonsense words
-//       const hallucinations = ["you", "thank you", "subtitles by", "watching"];
-//       const lowerText = text.toLowerCase();
-      
-//       if (!text || hallucinations.includes(lowerText) || text.length < 3) {
-//         console.log("🤐 Silence/Hallucination discarded.");
-//         return res.json({ text: "" }); 
-//       }
-
-//       console.log(`✅ Final Cleaned Translation: ${text}`);
-      
-//       // Send back to your Electron frontend
-//       res.json({ text });
-//     });
-
-//   } catch (err) {
-//     console.error("CRITICAL SERVER ERROR:", err);
-//     res.json({ error: "Audio processing failed", details: err.message });
-//   }
-// });
-
-
 app.post("/audio",async (req, res) => {
     try {
       if (!req.body || !req.body.length) {
@@ -403,45 +295,15 @@ app.post("/audio",async (req, res) => {
         });
       });
 
-      // 3️⃣ run whisper on REAL wav
-      const whisperExe = path.resolve(
-        __dirname,
-        "../whisper.cpp/build/bin/whisper-cli.exe"
-      );
 
-      const modelPath = path.resolve(
-        __dirname,
-        "../whisper.cpp/models/ggml-small.en.bin"
-      );
+      safeDelete(webmPath);
+      safeDelete(wavPath);
 
-      let output = "";
+      // 🔥 Clean streaming state cleanly when a full audio submission occurs
+      streamFullText = "";
+      lastStreamTime = 0;
 
-      const whisper = spawn(whisperExe, [
-        "-m", modelPath,
-        "-f", wavPath
-      ]);
-
-      whisper.stdout.on("data", d => {
-        output += d.toString();
-      });
-      whisper.stderr.on("data", () => {});
-
-      whisper.on("close", () => {
-        safeDelete(webmPath);
-        safeDelete(wavPath);
-        
-        // 🔥 Clean streaming state cleanly when a full audio submission occurs
-        streamFullText = "";
-
-        const text = output
-          .split("\n")
-          .filter(l => l.includes("]"))
-          .map(l => l.replace(/^.*\]\s*/, ""))
-          .join(" ")
-          .trim();
-
-        res.json({ text });
-      });
+      res.json({ text: "" });
 
     } catch (err) {
       console.error("AUDIO ERROR:", err);
@@ -456,135 +318,118 @@ app.post("/audio",async (req, res) => {
 let streamFullText = "";
 let lastStreamTime = 0;
 
-function mergeOverlappingText(base, addition) {
-  if (!base) return addition;
-  if (!addition) return base;
+/* ================= PCM → WAV HELPER ================= */
 
-  const bWords = base.split(/\s+/).filter(Boolean);
-  const aWords = addition.split(/\s+/).filter(Boolean);
+/**
+ * Converts a raw Int16 PCM buffer (16kHz, mono) into a valid WAV buffer.
+ * Built entirely in memory — NO FFmpeg, NO disk I/O for the header.
+ * @param {Buffer} pcmBuffer  Raw 16-bit little-endian PCM samples
+ * @param {number} sampleRate Defaults to 16000 (whisper.cpp requirement)
+ * @returns {Buffer} Complete WAV file buffer (header + data)
+ */
+function pcmToWav(pcmBuffer, sampleRate = 16000) {
+  const numChannels  = 1;
+  const bitsPerSample = 16;
+  const byteRate     = sampleRate * numChannels * (bitsPerSample / 8);
+  const blockAlign   = numChannels * (bitsPerSample / 8);
+  const dataSize     = pcmBuffer.length;
+  const header       = Buffer.alloc(44);
 
-  const bLower = bWords.map(w => w.toLowerCase().replace(/[^\w\s]/g, ""));
-  const aLower = aWords.map(w => w.toLowerCase().replace(/[^\w\s]/g, ""));
+  header.write("RIFF", 0);                          // ChunkID
+  header.writeUInt32LE(36 + dataSize, 4);            // ChunkSize
+  header.write("WAVE", 8);                          // Format
+  header.write("fmt ", 12);                         // Subchunk1ID
+  header.writeUInt32LE(16, 16);                      // Subchunk1Size (PCM)
+  header.writeUInt16LE(1, 20);                       // AudioFormat (PCM = 1)
+  header.writeUInt16LE(numChannels, 22);             // NumChannels
+  header.writeUInt32LE(sampleRate, 24);              // SampleRate
+  header.writeUInt32LE(byteRate, 28);                // ByteRate
+  header.writeUInt16LE(blockAlign, 32);              // BlockAlign
+  header.writeUInt16LE(bitsPerSample, 34);           // BitsPerSample
+  header.write("data", 36);                         // Subchunk2ID
+  header.writeUInt32LE(dataSize, 40);                // Subchunk2Size
 
-  let overlapIndex = -1;
-  const maxOverlap = Math.min(bLower.length, aLower.length);
-
-  for (let i = 1; i <= maxOverlap; i++) {
-    const bSlice = bLower.slice(-i).join(" ");
-    const aSlice = aLower.slice(0, i).join(" ");
-    if (bSlice === aSlice) {
-      overlapIndex = i;
-    }
-  }
-
-  if (overlapIndex > 0) {
-    // Keep base before overlap, attach new suffix
-    return bWords.concat(aWords.slice(overlapIndex)).join(" ");
-  }
-
-  // Fallback: If Whisper heavily corrected an earlier short fragment, just replace it
-  if (aWords.length >= 3 && bWords.length <= 3) {
-      return addition;
-  }
-
-  return base + " " + addition;
+  return Buffer.concat([header, pcmBuffer]);
 }
 
-app.post("/audio/stream", async (req, res) => {
-  try {
-    const now = Date.now();
-    if (now - lastStreamTime > 4000) {
-      streamFullText = ""; // Session timeout reset
-    }
-    lastStreamTime = now;
 
-    console.log("STREAM HIT:", req.body?.length);
+
+
+/* ================= AUDIO/FINAL — Whisper Medium ================= */
+
+const MEDIUM_MODEL_PATH = path.resolve(
+  __dirname,
+  "../whisper.cpp/models/ggml-medium.bin"
+);
+
+// Accepts the same raw WebM body as /audio.
+// Runs ggml-medium for single blocking transcription.
+app.post("/audio/final", async (req, res) => {
+  try {
     if (!req.body || !req.body.length) {
       return res.json({ text: "" });
     }
 
-    const webmPath = createTempFile("stream", ".webm");
-    const wavPath  = createTempFile("stream", ".wav");
+    const webmPath = createTempFile("final", ".webm");
+    const wavPath  = createTempFile("final", ".wav");
 
-    // Write full accumulated WebM payload directly (which has valid headers)
     fs.writeFileSync(webmPath, req.body);
 
     const ffmpegExe =
       "C:\\Users\\athar\\Downloads\\ffmpeg-8.0.1-essentials_build\\ffmpeg-8.0.1-essentials_build\\bin\\ffmpeg.exe";
 
-    // 🔄 Convert to WAV
     await new Promise((resolve, reject) => {
       const ff = spawn(ffmpegExe, [
-        "-y",
-        "-i", webmPath,
+        "-y", "-i", webmPath,
         "-ar", "16000",
         "-ac", "1",
+        "-c:a", "pcm_s16le",
         wavPath
       ]);
-
-      ff.stderr.on("data", d => console.log("FFMPEG:", d.toString()));
-
-      ff.on("close", code => {
-        if (code === 0) resolve();
-        else {
-          console.error("FFmpeg failed with code:", code);
-          reject(new Error("FFmpeg failed"));
-        }
-      });
+      ff.on("close", code => code === 0 ? resolve() : reject(new Error("ffmpeg failed")));
     });
 
-    const whisperExe = path.resolve(
-      __dirname,
-      "../whisper.cpp/build/bin/whisper-cli.exe"
+    safeDelete(webmPath);
+
+    const fs_stats = require("fs").statSync(wavPath);
+    if (fs_stats.size < 20000) {
+        console.log("🚫 Skipping small audio file:", wavPath, "(", fs_stats.size, "bytes)");
+        safeDelete(wavPath);
+        return res.json({ text: "" });
+    }
+
+    const text = await runFinalWhisper(
+      wavPath,
+      MEDIUM_MODEL_PATH,
+      [] // The required args (--language auto --translate --threads 8 --no-timestamps) are now hardcoded in the function.
     );
 
-    const modelPath = path.resolve(
-      __dirname,
-      "../whisper.cpp/models/ggml-small.en.bin"
-    );
+    let finalText = (text || "").trim();
 
-    let output = "";
-
-    const whisper = spawn(whisperExe, [
-      "-m", modelPath,
-      "-f", wavPath,
-      "-nt"
-    ]);
-
-    whisper.stdout.on("data", d => {
-      const out = d.toString();
-      output += out;
-      console.log("Whisper Target Output:", out.trim());
-    });
-    
-    whisper.stderr.on("data", d => {
-      // ignore verbose whisper stderr loading logs
-    });
-
-    whisper.on("close", () => {
-      safeDelete(webmPath);
+    // 🚫 Prevent empty override
+    if (!finalText) {
+      console.log("⚠️ Large model failed");
       safeDelete(wavPath);
+      return res.json({ text: null });
+    }
 
-      const text = output
-        .split("\n")
-        .map(l => l.replace(/^.*\]\s*/, ""))
-        .join(" ")
-        .trim();
+    // 🚫 Remove any meta junk just in case
+    finalText = finalText.replace(/\[.*?\]/g, "").trim();
 
-      if (text) {
-        streamFullText = mergeOverlappingText(streamFullText, text);
-      }
+    console.log("[audio/final] CLEAN:", finalText);
 
-      res.json({ text: streamFullText });
-    });
+    safeDelete(wavPath);
+
+    return res.json({ text: finalText });
 
   } catch (err) {
-    res.json({ text: "" });
+    console.error("[audio/final] error:", err.message);
+    res.json({ text: "" });  // empty → frontend falls back to small model result
   }
 });
 
-
 /* ================= TTS (PIPER) ================= */
+
 
 app.post("/speak", async (req, res) => {
   try {
