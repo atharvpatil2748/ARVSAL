@@ -68,13 +68,24 @@
 
     let mediaRecorder = null;
     let audioChunks = [];
-    let streamChunks = [];
     let micActive = false;
     let ignoreInput = false;
 
     let currentUserMessageId = null;
     let messageCounter = 0;
-    let lastTranscript = "";
+    let micSessionId = 0;
+    let currentProcessor = null;
+    let currentAudioContext = null;
+    let currentStream = null;
+
+    let systemState = "IDLE";
+    let streamBuffer = "";
+    let isStreaming = false;
+
+    function setState(newState) {
+      console.log("STATE:", systemState, "→", newState);
+      systemState = newState;
+    }
 
     function createMessage(sender, text) {
       const p = document.createElement("p");
@@ -104,6 +115,8 @@
     };
 
     async function handleText(text) {
+      setState("THINKING");
+
       if (currentUserMessageId) {
         updateMessage(currentUserMessageId, text);
         currentUserMessageId = null;
@@ -113,12 +126,18 @@
 
       const res = await window.arvsal.sendCommand(text);
 
-      if (!res?.reply) return;
+      if (!res?.reply) {
+        setState("IDLE");
+        window.arvsal.resumeWake();
+        return;
+      }
 
       addMessage("Arvsal", res.reply);
 
+      setState("SPEAKING");
       await speak(res.reply);
 
+      setState("RESTARTING");
       startMic(true);
     }
 
@@ -137,7 +156,57 @@
       });
     }
 
+    function mergeText(base, incoming) {
+      if (!base) return incoming;
+      if (!incoming) return base;
+
+      const b = base.toLowerCase();
+      const i = incoming.toLowerCase();
+
+      if (i.includes(b)) return incoming;
+      if (b.includes(i)) return base;
+
+      const maxOverlap = Math.min(base.length, incoming.length);
+      for (let len = maxOverlap; len > 5; len--) {
+        if (b.endsWith(i.substring(0, len))) {
+          return base + incoming.substring(len);
+        }
+      }
+
+      return base + " " + incoming;
+    }
+
     async function startMic(isFollowUp = false) {
+      if (systemState !== "IDLE" && systemState !== "RESTARTING") {
+        console.warn("Blocked startMic. Current state:", systemState);
+        return;
+      }
+
+      if (currentProcessor) {
+        try {
+          currentProcessor.disconnect();
+          currentProcessor.onaudioprocess = null;
+        } catch { }
+        currentProcessor = null;
+      }
+
+      if (currentAudioContext) {
+        try { currentAudioContext.close(); } catch { }
+        currentAudioContext = null;
+      }
+
+      if (currentStream) {
+        try { currentStream.getTracks().forEach(t => t.stop()); } catch { }
+        currentStream = null;
+      }
+
+      micSessionId++;
+      const sessionId = micSessionId;
+      isStreaming = false;
+      streamBuffer = "";
+      currentUserMessageId = null;
+
+      setState("LISTENING");
 
       if (micActive) return;
 
@@ -156,95 +225,148 @@
         }
       });
 
-      const audioContext = new AudioContext();
+      const audioContext = new AudioContext({ sampleRate: 16000 });
       const source = audioContext.createMediaStreamSource(stream);
+
       const analyser = audioContext.createAnalyser();
-
       analyser.fftSize = 2048;
-      analyser.smoothingTimeConstant = 0.8; // 🔥 IMPORTANT FIX
-
+      analyser.smoothingTimeConstant = 0.8;
       source.connect(analyser);
+
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      currentProcessor = processor;
+      currentAudioContext = audioContext;
+      currentStream = stream;
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+
+      const pcmChunks = [];
+      const MAX_BUFFER = 64000;
+      let lastSendTime = 0;
+      const STREAM_INTERVAL = 1500;
+
+      processor.onaudioprocess = async (event) => {
+        if (systemState !== "LISTENING" && systemState !== "STREAMING") return;
+
+        console.log("🎤 streaming tick");
+        if (ignoreInput || !micActive) return;
+
+        const now = Date.now();
+        if (now - lastSendTime < STREAM_INTERVAL) return;
+        lastSendTime = now;
+
+        const float32 = event.inputBuffer.getChannelData(0);
+        const int16 = new Int16Array(float32.length);
+        for (let i = 0; i < float32.length; i++) {
+          int16[i] = Math.max(-1, Math.min(1, float32[i])) * 32767;
+        }
+
+        pcmChunks.push(int16);
+
+        let totalBytes = pcmChunks.reduce((acc, c) => acc + c.byteLength, 0);
+        while (pcmChunks.length > 0 && totalBytes > MAX_BUFFER) {
+          totalBytes -= pcmChunks[0].byteLength;
+          pcmChunks.shift();
+        }
+
+        const totalSamples = pcmChunks.reduce((acc, c) => acc + c.length, 0);
+        const merged = new Int16Array(totalSamples);
+        let offset = 0;
+        for (const chunk of pcmChunks) {
+          merged.set(chunk, offset);
+          offset += chunk.length;
+        }
+
+        // No streaming implemented entirely
+        // Just keeping the UI alive until silence/stop
+      };
 
       mediaRecorder = new MediaRecorder(stream, {
         mimeType: "audio/webm;codecs=opus"
       });
 
       audioChunks = [];
-      streamChunks = [];
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunks.push(e.data);
+      };
+
+      // Streaming logic completely removed for clean architecture
 
       let hasSpoken = false;
       let silenceTimer = null;
       let noSpeechTimer = null;
       let grace = true;
-      let isStreaming = false;
       let speechStartTime = null;
 
       setTimeout(() => grace = false, 800);
 
-      mediaRecorder.ondataavailable = async e => {
-        if (e.data.size > 0) {
-
-          audioChunks.push(e.data);
-
-          if (!ignoreInput) {
-
-            if (!currentUserMessageId) {
-              currentUserMessageId = createMessage("You", "...");
-            }
-
-            streamChunks.push(e.data);
-
-            if (streamChunks.length > 6) {
-              streamChunks.shift();
-            }
-
-            if (!isStreaming && audioChunks.length > 0) {
-              isStreaming = true;
-
-              const chunksToSend = [audioChunks[0]];
-              for (const chunk of streamChunks) {
-                if (chunk !== audioChunks[0]) chunksToSend.push(chunk);
-              }
-
-              const blob = new Blob(chunksToSend, { type: "audio/webm" });
-              const buffer = await blob.arrayBuffer();
-
-              try {
-                const res = await window.arvsal.streamAudio(buffer);
-                if (res?.text && currentUserMessageId) {
-                  const newText = res.text.trim();
-
-                  // 🔥 Enforce monotonic growth
-                  if (newText.length >= lastTranscript.length) {
-                    lastTranscript = newText;
-                    updateMessage(currentUserMessageId, lastTranscript);
-                  }
-                }
-              } finally {
-                isStreaming = false;
-              }
-            }
-          }
-        }
-      };
-
       mediaRecorder.onstop = async () => {
-
+        isStreaming = false;
+        processor.onaudioprocess = null;
         micActive = false;
         micBtn.textContent = "🎤";
+
+        if (systemState === "STREAMING" || systemState === "LISTENING") {
+          setState("PROCESSING_FINAL");
+        }
+
+        streamBuffer = "";
+        processor.disconnect();
+        source.disconnect();
+        audioContext.close();
 
         stream.getTracks().forEach(t => t.stop());
         clearTimeout(silenceTimer);
         clearTimeout(noSpeechTimer);
 
+        const recordingDuration = Date.now() - micStartTime;
+        if (!hasSpoken || recordingDuration < 1500) {
+          console.log(`🚫 Ignoring silent/short input (${recordingDuration}ms, spoken: ${hasSpoken})`);
+          streamBuffer = "";
+          pcmChunks.length = 0;
+          if (currentUserMessageId) {
+            const el = document.getElementById(currentUserMessageId);
+            if (el) el.remove();
+            currentUserMessageId = null;
+          }
+          setState("IDLE");
+          window.arvsal.resumeWake();
+          return;
+        }
+
         if (audioChunks.length > 0) {
+          setState("PROCESSING_FINAL");
           const blob = new Blob(audioChunks, { type: "audio/webm" });
           const buffer = await blob.arrayBuffer();
-          const res = await window.arvsal.sendAudio(buffer);
 
-          if (res?.text) {
-            await handleText(res.text);
-            lastTranscript = "";
+          let finalText = "";
+          try {
+            const largeRes = await window.arvsal.sendFinalAudio(buffer);
+            finalText = largeRes?.text?.trim() || "";
+            if (finalText) console.log("[Hybrid] large-v3 accepted:", finalText);
+          } catch (e) {
+            console.warn("[Hybrid] large-v3 failed:", e.message);
+          }
+
+          if (!finalText) {
+            try {
+              const smallRes = await window.arvsal.sendAudio(buffer);
+              finalText = smallRes?.text?.trim() || "";
+              if (finalText) console.log("[Hybrid] small model fallback:", finalText);
+            } catch (e) {
+              console.warn("[Hybrid] small model also failed:", e.message);
+            }
+          }
+
+          streamBuffer = "";
+          pcmChunks.length = 0;
+
+          if (finalText) {
+            if (currentUserMessageId) {
+              updateMessage(currentUserMessageId, finalText);
+            }
+            await handleText(finalText);
+            streamBuffer = "";
             return;
           } else {
             if (currentUserMessageId) {
@@ -252,14 +374,22 @@
               if (el) el.remove();
               currentUserMessageId = null;
             }
-            lastTranscript = "";
           }
+        }
+
+        isStreaming = false;
+        streamBuffer = "";
+        currentUserMessageId = null;
+
+        if (systemState === "PROCESSING_FINAL" || systemState === "LISTENING" || systemState === "STREAMING") {
+          setState("IDLE");
         }
 
         window.arvsal.resumeWake();
       };
 
       mediaRecorder.start(300);
+      const micStartTime = Date.now();
 
       const data = new Uint8Array(analyser.frequencyBinCount);
 
@@ -276,15 +406,12 @@
       const MIN_SPEECH_TIME = 700;
 
       const detectSilence = () => {
-
         analyser.getByteTimeDomainData(data);
-
         let sum = 0;
         for (let i = 0; i < data.length; i++) {
           const val = (data[i] - 128) / 128;
           sum += val * val;
         }
-
         const rms = Math.sqrt(sum / data.length);
 
         if (rms > 0.02) {
@@ -296,9 +423,7 @@
         }
 
         if (!grace && hasSpoken && rms < SILENCE_THRESHOLD) {
-
           const speechDuration = Date.now() - (speechStartTime || Date.now());
-
           if (speechDuration < MIN_SPEECH_TIME) {
             clearTimeout(silenceTimer);
             silenceTimer = null;
@@ -311,7 +436,6 @@
               }, SILENCE_DURATION);
             }
           }
-
         } else {
           clearTimeout(silenceTimer);
           silenceTimer = null;
@@ -325,24 +449,25 @@
       detectSilence();
     }
 
-    micBtn.onclick = () => startMic(false);
+    micBtn.onclick = () => {
+      // Allow start Mic via UI only if IDLE
+      if (systemState === "IDLE") {
+        startMic(false);
+      }
+    };
 
     window.arvsal.onWake(async () => {
-
       if (micActive) return;
+      if (systemState !== "IDLE") return;
 
       window.arvsal.stopWake();
-
       startMic(false);
 
       ignoreInput = true;
-
       const audio = new Audio("yes_sir.wav");
-
       audio.onended = () => {
         ignoreInput = false;
       };
-
       audio.play();
     });
 
