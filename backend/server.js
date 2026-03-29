@@ -62,7 +62,7 @@ const { processMemoryQuery } = require("./cognitiveEngine");
 const { generatePlan } = require("./plannerEngine");
 const { runLLM } = require("./llmRunner");
 const { isActionIntent } = require("./actionIntentDetector");
-const { sendTelegramMessage, fetchUpdates, sendTelegramDocument,downloadTelegramFile, downloadTelegramFileToBuffer } = require("./telegramService");
+const { sendTelegramMessage, fetchUpdates, sendTelegramDocument, downloadTelegramFile, downloadTelegramFileToBuffer } = require("./telegramService");
 const { enableRemote, disableRemote, isRemoteEnabled } = require("./remoteControl");
 const { verifyToken } = require("./totpManager");
 const { searchFileByName } = require("./fileSearch");
@@ -161,6 +161,81 @@ function stripWakeWord(text = "") {
     .trim();
 }
 
+async function speakLocally(text) {
+  return new Promise((resolve) => {
+    try {
+      const wavPath = createTempFile("tts_local", ".wav");
+
+      const piperExe =
+        "C:\\Users\\athar\\Downloads\\piper_windows_amd64\\piper\\piper.exe";
+
+      const modelPath =
+        "C:\\Users\\athar\\Downloads\\piper_windows_amd64\\piper\\en_US-ryan-high.onnx";
+
+      // 🔹 Step 1: Generate audio
+      const tts = spawn(piperExe, ["-m", modelPath, "-f", wavPath]);
+
+      tts.stdin.write(text);
+      tts.stdin.end();
+
+      tts.on("close", () => {
+
+        // 🔹 Step 2: Play audio locally (Windows safe)
+        const player = spawn("powershell", [
+          "-c",
+          `(New-Object Media.SoundPlayer "${wavPath}").PlaySync();`
+        ]);
+
+        player.on("close", () => {
+          safeDelete(wavPath);
+          resolve();
+        });
+      });
+
+    } catch (err) {
+      console.log("Local TTS error:", err.message);
+      resolve(); // never break pipeline
+    }
+  });
+}
+
+let speaking = false;
+
+async function sendStatus(message) {
+  console.log("🧠 ARVSAL:", message);
+
+  if (speaking) return;
+
+  speaking = true;
+
+  try {
+    await speakLocally(message); // 🔥 USE LOCAL SPEAKER
+  } catch (err) {
+    console.log("TTS failed:", err.message);
+  }
+
+  speaking = false;
+}
+
+function startNarrationSequence(messages, interval = 10000) {
+  let i = 0;
+  let stopped = false;
+
+  const loop = async () => {
+    while (!stopped && i < messages.length) {
+      await sendStatus(messages[i]); // ✅ MUST await
+      i++;
+      await new Promise(r => setTimeout(r, interval));
+    }
+  };
+
+  loop();
+
+  return () => {
+    stopped = true;
+  };
+}
+
 async function analyzeScreen(prompt) {
 
   const tempPath = createTempFile("screen", ".png");
@@ -227,7 +302,7 @@ async function analyzeScreen(prompt) {
       User request:
       ${prompt || "Analyze and explain clearly."}
       `;
-      
+
       result = await llmRouter({
         intent: "GENERAL_QUESTION",
         text: textPrompt
@@ -252,67 +327,67 @@ async function analyzeScreen(prompt) {
   } finally {
 
     // ⭐ CLEANUP MUST NEVER THROW
-    try { safeDelete(tempPath); } catch {}
-    try { safeDelete(processedPath); } catch {}
+    try { safeDelete(tempPath); } catch { }
+    try { safeDelete(processedPath); } catch { }
   }
 }
 
 /* ================= MEMORY CONFIDENCE DECAY ================= */
 
-try { memory.decayConfidence(); } catch {}
+try { memory.decayConfidence(); } catch { }
 setInterval(() => {
-  try { memory.decayConfidence(); } catch {}
+  try { memory.decayConfidence(); } catch { }
 }, 6 * 60 * 60 * 1000);
 
-app.post("/audio",async (req, res) => {
-    try {
-      if (!req.body || !req.body.length) {
-        return res.json({ error: "Empty audio buffer" });
-      }
-
-      const base = `arvsal_${Date.now()}`;
-      const webmPath = createTempFile("audio", ".webm");
-      const wavPath  = createTempFile("audio", ".wav");
-
-      // 1️⃣ write WEBM exactly as received
-      fs.writeFileSync(webmPath, req.body);
-
-      // 2️⃣ convert WEBM → WAV (16kHz mono)
-      const ffmpegExe =
-        "C:\\Users\\athar\\Downloads\\ffmpeg-8.0.1-essentials_build\\ffmpeg-8.0.1-essentials_build\\bin\\ffmpeg.exe";
-
-      await new Promise((resolve, reject) => {
-        const ff = spawn(ffmpegExe, [
-          "-y",
-          "-i", webmPath,
-          "-ar", "16000",
-          "-ac", "1",
-          wavPath
-        ]);
-
-        ff.on("close", code => {
-          code === 0 ? resolve() : reject(new Error("ffmpeg failed"));
-        });
-      });
-
-
-      safeDelete(webmPath);
-      safeDelete(wavPath);
-
-      // 🔥 Clean streaming state cleanly when a full audio submission occurs
-      streamFullText = "";
-      lastStreamTime = 0;
-
-      res.json({ text: "" });
-
-    } catch (err) {
-      console.error("AUDIO ERROR:", err);
-      res.json({
-        error: "Audio processing failed",
-        details: err.message
-      });
+app.post("/audio", async (req, res) => {
+  try {
+    if (!req.body || !req.body.length) {
+      return res.json({ error: "Empty audio buffer" });
     }
+
+    const base = `arvsal_${Date.now()}`;
+    const webmPath = createTempFile("audio", ".webm");
+    const wavPath = createTempFile("audio", ".wav");
+
+    // 1️⃣ write WEBM exactly as received
+    fs.writeFileSync(webmPath, req.body);
+
+    // 2️⃣ convert WEBM → WAV (16kHz mono)
+    const ffmpegExe =
+      "C:\\Users\\athar\\Downloads\\ffmpeg-8.0.1-essentials_build\\ffmpeg-8.0.1-essentials_build\\bin\\ffmpeg.exe";
+
+    await new Promise((resolve, reject) => {
+      const ff = spawn(ffmpegExe, [
+        "-y",
+        "-i", webmPath,
+        "-ar", "16000",
+        "-ac", "1",
+        wavPath
+      ]);
+
+      ff.on("close", code => {
+        code === 0 ? resolve() : reject(new Error("ffmpeg failed"));
+      });
+    });
+
+
+    safeDelete(webmPath);
+    safeDelete(wavPath);
+
+    // 🔥 Clean streaming state cleanly when a full audio submission occurs
+    streamFullText = "";
+    lastStreamTime = 0;
+
+    res.json({ text: "" });
+
+  } catch (err) {
+    console.error("AUDIO ERROR:", err);
+    res.json({
+      error: "Audio processing failed",
+      details: err.message
+    });
   }
+}
 );
 
 let streamFullText = "";
@@ -328,12 +403,12 @@ let lastStreamTime = 0;
  * @returns {Buffer} Complete WAV file buffer (header + data)
  */
 function pcmToWav(pcmBuffer, sampleRate = 16000) {
-  const numChannels  = 1;
+  const numChannels = 1;
   const bitsPerSample = 16;
-  const byteRate     = sampleRate * numChannels * (bitsPerSample / 8);
-  const blockAlign   = numChannels * (bitsPerSample / 8);
-  const dataSize     = pcmBuffer.length;
-  const header       = Buffer.alloc(44);
+  const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+  const blockAlign = numChannels * (bitsPerSample / 8);
+  const dataSize = pcmBuffer.length;
+  const header = Buffer.alloc(44);
 
   header.write("RIFF", 0);                          // ChunkID
   header.writeUInt32LE(36 + dataSize, 4);            // ChunkSize
@@ -371,7 +446,7 @@ app.post("/audio/final", async (req, res) => {
     }
 
     const webmPath = createTempFile("final", ".webm");
-    const wavPath  = createTempFile("final", ".wav");
+    const wavPath = createTempFile("final", ".wav");
 
     fs.writeFileSync(webmPath, req.body);
 
@@ -393,9 +468,9 @@ app.post("/audio/final", async (req, res) => {
 
     const fs_stats = require("fs").statSync(wavPath);
     if (fs_stats.size < 40000) {
-        console.log("🚫 Skipping small audio file:", wavPath, "(", fs_stats.size, "bytes)");
-        safeDelete(wavPath);
-        return res.json({ text: "" });
+      console.log("🚫 Skipping small audio file:", wavPath, "(", fs_stats.size, "bytes)");
+      safeDelete(wavPath);
+      return res.json({ text: "" });
     }
 
     const text = await runFinalWhisper(
@@ -415,7 +490,7 @@ app.post("/audio/final", async (req, res) => {
       safeDelete(wavPath);
       return res.json({ text: "" });
     }
-    
+
     // 🚫 Prevent empty override
     if (!finalText) {
       console.log("⚠️ Large model failed");
@@ -598,7 +673,7 @@ app.post("/command", async (req, res) => {
   );
 
   /* ---------- TELEGRAM ---------- */
-  
+
   if (source === "telegram") {
 
     const parts = cleanRawText.split(" ");
@@ -684,25 +759,25 @@ app.post("/command", async (req, res) => {
 
   if (lower.startsWith("analyze screen")) {
 
-  let prompt = rawInput
-    .replace(/analyze screen/i, "")
-    .replace(/[^\w\s]/g, "")   // remove punctuation
-    .trim();
+    let prompt = rawInput
+      .replace(/analyze screen/i, "")
+      .replace(/[^\w\s]/g, "")   // remove punctuation
+      .trim();
 
-  if (!prompt || prompt.length < 3) {
-    prompt = "Analyze and explain clearly.";
+    if (!prompt || prompt.length < 3) {
+      prompt = "Analyze and explain clearly.";
+    }
+
+    try {
+
+      const result = await analyzeScreen(prompt);
+
+      return res.json({ reply: result });
+
+    } catch (err) {
+      return res.json({ reply: "Vision analysis failed: " + err.message });
+    }
   }
-
-  try {
-
-    const result = await analyzeScreen(prompt);
-
-    return res.json({ reply: result });
-
-  } catch (err) {
-    return res.json({ reply: "Vision analysis failed: " + err.message });
-  }
-}
 
   let intentObj = null; // ✅ declare first (VERY IMPORTANT)
 
@@ -800,48 +875,48 @@ app.post("/command", async (req, res) => {
     return res.json({ reply });
   }
 
-/* ---------- COGNITIVE MEMORY LAYER (DEBUG MODE) ---------- */
+  /* ---------- COGNITIVE MEMORY LAYER (DEBUG MODE) ---------- */
 
-if (
-  intentObj.intent === "GENERAL_QUESTION" &&
-  cleanRawText.length > 5
-) {
-  try {
+  if (
+    intentObj.intent === "GENERAL_QUESTION" &&
+    cleanRawText.length > 5
+  ) {
+    try {
 
-    console.log("\n================ COGNITIVE DEBUG START ================");
-    console.log("Query:", cleanRawText);
+      console.log("\n================ COGNITIVE DEBUG START ================");
+      console.log("Query:", cleanRawText);
 
-    const cognitive = await processMemoryQuery({
-      text: cleanRawText
-    });
-
-    if (!cognitive || cognitive.recallStrength === 0) {
-
-      console.log("COGNITIVE: No relevant memory found.");
-      console.log("=======================================================\n");
-
-    } else {
-
-      console.log(
-        "Recall Strength:",
-        cognitive.recallStrength.toFixed(3)
-      );
-
-      console.log("\n--- Relevant Memory ---");
-
-      cognitive.relevantMemory.forEach((item, i) => {
-        console.log(
-          `[${i + 1}] (${item.type}) ${item.value} | score=${item.confidence.toFixed(3)}`
-        );
+      const cognitive = await processMemoryQuery({
+        text: cleanRawText
       });
 
-      console.log("================= COGNITIVE DEBUG END =================\n");
-    }
+      if (!cognitive || cognitive.recallStrength === 0) {
 
-  } catch (err) {
-    console.error("COGNITIVE ERROR:", err);
+        console.log("COGNITIVE: No relevant memory found.");
+        console.log("=======================================================\n");
+
+      } else {
+
+        console.log(
+          "Recall Strength:",
+          cognitive.recallStrength.toFixed(3)
+        );
+
+        console.log("\n--- Relevant Memory ---");
+
+        cognitive.relevantMemory.forEach((item, i) => {
+          console.log(
+            `[${i + 1}] (${item.type}) ${item.value} | score=${item.confidence.toFixed(3)}`
+          );
+        });
+
+        console.log("================= COGNITIVE DEBUG END =================\n");
+      }
+
+    } catch (err) {
+      console.error("COGNITIVE ERROR:", err);
+    }
   }
-}
 
   /* ---------- MAIN EXECUTION ---------- */
 
@@ -950,15 +1025,15 @@ if (
 
       case "WEBCAM_SNAP":
         if (source === "telegram") {
-            try {
-                // Call the new service
-                await takeAeyeSnap();
-                reply = "A-Eye scan complete. Image sent to your secure channel.";
-            } catch (err) {
-                reply = "A-Eye failed: " + err;
-            }
+          try {
+            // Call the new service
+            await takeAeyeSnap();
+            reply = "A-Eye scan complete. Image sent to your secure channel.";
+          } catch (err) {
+            reply = "A-Eye failed: " + err;
+          }
         } else {
-            reply = "Visual scanning is restricted to external secure channels.";
+          reply = "Visual scanning is restricted to external secure channels.";
         }
         skipEpisodic = true;
         skipPersonality = true;
@@ -1000,6 +1075,83 @@ if (
         skipPersonality = true;
         break;
 
+      case "EMAIL_FETCH": {
+        const { fetchAndProcess } = require("./email/emailHandler");
+
+        skipEpisodic = true;
+
+        // 🔥 START NARRATION LOOP
+        const stopNarration = startNarrationSequence([
+          "Fetching your emails sir...",
+          "Scanning inbox...",
+          "Collecting relevant information...",
+          "Categorising events and deadlines...",
+          "Updating your calendar...",
+          "Preparing your schedule briefing..."
+        ], 10000);
+
+        try {
+          const result = await fetchAndProcess();
+
+          // 🔥 STOP narration immediately after pipeline
+          stopNarration();
+
+          if (result.type === "error") {
+            reply = "I couldn't fetch your emails right now.";
+            break;
+          }
+
+          const data = result.data;
+
+          // 🔥 OPTIONAL dynamic update
+          sendStatus(`You have ${data.events.length + data.deadlines.length} updates.`);
+
+          const prompt = `
+          You are Arvsal, a highly intelligent personal assistant like Jarvis.
+
+          You are given structured data of events and deadlines extracted from emails.
+          These items have already been automatically added to the user's calendar.
+
+          Your task:
+          - Speak naturally and concisely
+          - Summarize intelligently (don't list everything blindly)
+          - Highlight important or urgent things
+          - Mention time and location where useful
+          - Prioritize high priority deadlines
+          - Briefly acknowledge that the events/deadlines are already scheduled in the calendar (do this naturally, not repetitively)
+          - Sound human, not robotic
+
+          DATA:
+          Events:
+          ${JSON.stringify(data.events, null, 2)}
+
+          Deadlines:
+          ${JSON.stringify(data.deadlines, null, 2)}
+
+          User query:
+          "${cleanRawText}"
+
+          Now respond naturally like a smart assistant.
+          `;
+
+          reply = await runLLM({
+            model: "llama3",
+            prompt,
+            timeout: 20000
+          });
+
+          if (!reply) {
+            reply = "I couldn't process your schedule properly.";
+          }
+
+        } catch (err) {
+          stopNarration(); // 🔥 VERY IMPORTANT (avoid infinite speaking)
+          console.error("EMAIL_FETCH ERROR:", err);
+          reply = "Something went wrong while checking your emails.";
+        }
+
+        break;
+      }
       /* ===== GENERATIVE (LAST) ===== */
 
       /* ===== SCREEN ACTION (Vision Automation Layer) ===== */
@@ -1172,60 +1324,60 @@ if (
           plan.goal !== "unclear"
         ) {
 
-        const { executeTool } = require("./tools/toolRegistry");
-        const { evaluate } = require("./safety/riskEngine");
+          const { executeTool } = require("./tools/toolRegistry");
+          const { evaluate } = require("./safety/riskEngine");
 
-        const risk = evaluate(plan);
+          const risk = evaluate(plan);
 
-        if (!risk.allowed) {
-          reply = "This action is blocked for safety.";
-          break;
-        }
-
-        if (risk.requiresConfirmation) {
-          reply = "This action requires confirmation.";
-          break;
-        }
-
-        let executionResults = [];
-        let allSuccess = true;
-        const EXECUTABLE_TOOLS = ["system", "desktop", "n8n"];
-
-        for (const step of plan.steps) {
-
-          if (!EXECUTABLE_TOOLS.includes(step.tool)) {
-            continue; // ignore non-executable tools
+          if (!risk.allowed) {
+            reply = "This action is blocked for safety.";
+            break;
           }
 
-          const result = await executeTool(step);
-          executionResults.push(result);
-
-          if (!result?.success) {
-            allSuccess = false;
+          if (risk.requiresConfirmation) {
+            reply = "This action requires confirmation.";
+            break;
           }
-        }
 
-        /* ===== If any action failed ===== */
-        if (!allSuccess) {
+          let executionResults = [];
+          let allSuccess = true;
+          const EXECUTABLE_TOOLS = ["system", "desktop", "n8n"];
 
-          const errors = executionResults
-            .filter(r => !r.success)
-            .map(r => r.error)
-            .join(", ");
+          for (const step of plan.steps) {
 
-          reply = `I tried to execute that, but it failed: ${errors}`;
+            if (!EXECUTABLE_TOOLS.includes(step.tool)) {
+              continue; // ignore non-executable tools
+            }
+
+            const result = await executeTool(step);
+            executionResults.push(result);
+
+            if (!result?.success) {
+              allSuccess = false;
+            }
+          }
+
+          /* ===== If any action failed ===== */
+          if (!allSuccess) {
+
+            const errors = executionResults
+              .filter(r => !r.success)
+              .map(r => r.error)
+              .join(", ");
+
+            reply = `I tried to execute that, but it failed: ${errors}`;
+            break;
+          }
+
+          /* ===== If execution successful → generate natural confirmation ===== */
+
+          if (plan.goal && plan.goal !== "unclear") {
+            reply = `Action completed: ${plan.goal}`;
+          } else {
+            reply = "Action completed successfully.";
+          }
           break;
         }
-
-        /* ===== If execution successful → generate natural confirmation ===== */
-
-        if (plan.goal && plan.goal !== "unclear") {
-          reply = `Action completed: ${plan.goal}`;
-        } else {
-          reply = "Action completed successfully.";
-        }
-        break;
-      }
 
         // 3️⃣ Otherwise fallback to LLM chat
         reply = await llmRouter({
@@ -1293,7 +1445,7 @@ if (
   /* ---------- REFLECTION (FIRE-AND-FORGET) ---------- */
 
   // 🔥 NEVER await — Mistral runs in background, response is immediate
-  setImmediate(() => maybeRunReflection("user").catch(() => {}));
+  setImmediate(() => maybeRunReflection("user").catch(() => { }));
   res.json({ reply });
 });
 
@@ -1372,7 +1524,7 @@ Add at bottom:
     });
 
     // Human-like delay
-    await new Promise(r => setTimeout(r, 4000 + Math.random()*4000));
+    await new Promise(r => setTimeout(r, 4000 + Math.random() * 4000));
 
     await sendMessage(number, aiReply);
 
@@ -1388,7 +1540,7 @@ async function startTelegramListener() {
 
   let offset = 0;
   // 🔥 Declared outside the loop so it remembers your progress
-  let userState = {}; 
+  let userState = {};
 
   while (true) {
     try {
@@ -1404,8 +1556,8 @@ async function startTelegramListener() {
 
         // 🔒 THE GATEKEEPER: Strictly only for your Telegram ID
         if (String(chatId) !== process.env.TELEGRAM_CHAT_ID) {
-            console.log(`⚠️ Blocked unauthorized access from: ${chatId}`);
-            continue;
+          console.log(`⚠️ Blocked unauthorized access from: ${chatId}`);
+          continue;
         }
 
         /* ================= 1. TEXT MESSAGE HANDLING ================= */
@@ -1418,24 +1570,24 @@ async function startTelegramListener() {
             userState[chatId] = { mode: "PDF", step: "COLLECTING" };
             conversionEngine.startSession(chatId);
             await sendTelegramMessage("📥 A-Eye Batch Mode: ON. Send your mixed files. Type '@arvsal finish' when done.");
-            continue; 
+            continue;
           }
 
           // B. Naming Step (The Final Hook)
           if (userState[chatId]?.step === "NAMING") {
-              const pdfName = raw.replace("@arvsal", "").trim();
-              await sendTelegramMessage(`⚙️ Finalizing ${pdfName}.pdf...`);
-              
-              try {
-                  const finalPath = await conversionEngine.finalize(chatId, pdfName);
-                  await sendTelegramDocument(finalPath);
-                  setTimeout(() => safeDelete(finalPath), 1500);
-                  delete userState[chatId];
-                  await sendTelegramMessage("✅ Project complete. Workspace purged.");
-              } catch (err) {
-                  await sendTelegramMessage("❌ Engine Error: " + err.message);
-              }
-              continue; // 🔥 USE CONTINUE INSTEAD OF RETURN
+            const pdfName = raw.replace("@arvsal", "").trim();
+            await sendTelegramMessage(`⚙️ Finalizing ${pdfName}.pdf...`);
+
+            try {
+              const finalPath = await conversionEngine.finalize(chatId, pdfName);
+              await sendTelegramDocument(finalPath);
+              setTimeout(() => safeDelete(finalPath), 1500);
+              delete userState[chatId];
+              await sendTelegramMessage("✅ Project complete. Workspace purged.");
+            } catch (err) {
+              await sendTelegramMessage("❌ Engine Error: " + err.message);
+            }
+            continue; // 🔥 USE CONTINUE INSTEAD OF RETURN
           }
 
 
@@ -1482,16 +1634,16 @@ async function startTelegramListener() {
           }
 
           if (fileId) {
-              if (userState[chatId]?.step === "COLLECTING") {
-                  const fileBuffer = await downloadTelegramFileToBuffer(fileId);
-                  if (fileBuffer) {
-                      // 🔥 CHANGE: Pass messageObj.message_id as the 4th argument
-                      await conversionEngine.addFile(chatId, fileName, fileBuffer, messageObj.message_id);
-                      console.log(`📎 Added to batch (ID: ${messageObj.message_id}): ${fileName}`);
-                  } else {
-                      await sendTelegramMessage(`⚠️ Failed to download ${fileName}. Skipping.`);
-                  }
+            if (userState[chatId]?.step === "COLLECTING") {
+              const fileBuffer = await downloadTelegramFileToBuffer(fileId);
+              if (fileBuffer) {
+                // 🔥 CHANGE: Pass messageObj.message_id as the 4th argument
+                await conversionEngine.addFile(chatId, fileName, fileBuffer, messageObj.message_id);
+                console.log(`📎 Added to batch (ID: ${messageObj.message_id}): ${fileName}`);
+              } else {
+                await sendTelegramMessage(`⚠️ Failed to download ${fileName}. Skipping.`);
               }
+            }
           }
 
         }
