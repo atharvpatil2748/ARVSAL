@@ -354,6 +354,20 @@ function classifyIntent(input) {
     return { intent: "SCREEN_ACTION_MIXED", rawText: original };
   }
 
+
+  /* ================= EMAIL INTELLIGENCE (STRICT COMMAND) ================= */
+
+if (
+  /^(check|show|get|fetch|tell me|what are|any)\b.*\b(emails?|mail|inbox)\b/i.test(lower) ||
+  /^(what('| i)?s|show|tell me|list|any)\b.*\b(events?|schedule|calendar)\b/i.test(lower) ||
+  /^(what('| i)?s|show|tell me|list|any)\b.*\b(deadlines?|due)\b/i.test(lower)
+) {
+  return {
+    intent: "EMAIL_FETCH",
+    rawText: original
+  };
+}
+
   /* ================= DEFAULT ================= */
 
   return { intent: "GENERAL_QUESTION", rawText: original };
