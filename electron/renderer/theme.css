@@ -1,0 +1,16 @@
+:root {
+  --bg-color: #050914;
+  --core-idle: #38bdf8;
+  --core-active: #06b6d4;
+  --core-warning: #fbbf24;
+  --text-main: #f8fafc;
+  --text-muted: #94a3b8;
+  --mic-level: 0;
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', sans-serif;
+  background-color: var(--bg-color);
+  color: var(--text-main);
+}

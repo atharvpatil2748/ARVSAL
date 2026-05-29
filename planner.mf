@@ -1,0 +1,14 @@
+# Base on the 3B Coder model for 2GB VRAM efficiency
+FROM qwen2.5-coder:3b
+
+# Strict deterministic parameters for planning
+PARAMETER temperature 0
+PARAMETER top_p 0.1
+PARAMETER repeat_penalty 1.1
+
+# Ensure it doesn't run on forever
+PARAMETER stop "<|im_end|>"
+PARAMETER stop "<|endoftext|>"
+
+# Minimal System Prompt - The Mega-Prompt will override/extend this later
+SYSTEM "You are a specialized planning core. Await the Mega-Prompt for tool definitions and task constraints."

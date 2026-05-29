@@ -1,0 +1,83 @@
+/* Hardware Acceleration & Transitions */
+
+body {
+  transition: background-color 1.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+#ai-core-orb {
+  will-change: transform, opacity, background-color, border-radius;
+  transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+#ambient-glow {
+  will-change: transform, opacity;
+  transition: transform 1.2s cubic-bezier(0.16, 1, 0.3, 1), opacity 1.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+button {
+  transition: background-color 0.2s;
+}
+
+#system-status-text {
+  transition: color 0.3s;
+}
+
+/* Base states trigger animations */
+body.state-idle #ai-core-orb {
+  animation: breathe 4s infinite ease-in-out;
+}
+
+body.state-thinking #ai-core-orb, body.state-processing_final #ai-core-orb {
+  animation: drift-pulse 3s infinite ease-in-out;
+}
+
+body.state-speaking #ai-core-orb {
+  animation: speak-pulse 0.8s infinite alternate ease-in-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+#chat p {
+  will-change: transform, opacity;
+  animation: fadeIn 0.4s ease-out forwards;
+}
+
+@keyframes breathe {
+  0%, 100% { transform: scale(1); opacity: 0.8; }
+  50% { transform: scale(1.05); opacity: 1; }
+}
+
+@keyframes ambient-drift {
+  0% { transform: translate(-50%, -50%) scale(1) rotate(0deg); opacity: 0.5; }
+  33% { transform: translate(-48%, -52%) scale(1.05) rotate(1deg); opacity: 0.6; }
+  66% { transform: translate(-52%, -48%) scale(0.95) rotate(-1deg); opacity: 0.55; }
+  100% { transform: translate(-50%, -50%) scale(1) rotate(0deg); opacity: 0.5; }
+}
+
+@keyframes drift-pulse {
+  0%, 100% { transform: scale(1) translateY(0); opacity: 0.8; }
+  50% { transform: scale(1.08) translateY(-4px); opacity: 1; }
+}
+
+@keyframes speak-pulse {
+  0% { transform: scale(1); opacity: 0.9; }
+  100% { transform: scale(1.15); opacity: 1; }
+}
+
+@keyframes orb-float {
+  0%, 100% { transform: translate(-50%, -50%); }
+  50% { transform: translate(-50%, -54%); }
+}
+
+body.state-idle #ambient-glow {
+  animation: ambient-drift 12s infinite ease-in-out;
+}
+
+body.state-idle #ai-core-container {
+  animation: orb-float 8s infinite ease-in-out;
+}
+
+

@@ -1,0 +1,46 @@
+/* Base State Colors and Transforms */
+
+body.state-idle #ai-core-orb {
+  background-color: var(--core-idle);
+}
+body.state-idle #system-status-text {
+  color: var(--text-muted);
+}
+
+body.state-wake_detected #ambient-glow {
+  opacity: 0.8;
+  transform: translate(-50%, -50%) scale(1.2);
+}
+body.state-wake_detected #ai-core-orb {
+  transform: scale(1.3);
+  background-color: #fff;
+}
+
+body.state-listening #ambient-glow {
+  opacity: 0.6;
+}
+body.state-listening #ai-core-orb {
+  background-color: var(--core-warning);
+  transform: scale(calc(1 + (var(--mic-level) * 15)));
+}
+body.state-listening #system-status-text {
+  color: var(--core-warning);
+}
+#micBtn.listening {
+  color: var(--core-warning);
+}
+
+body.state-thinking #ai-core-orb, body.state-processing_final #ai-core-orb {
+  background-color: var(--core-active);
+  border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%;
+}
+body.state-thinking #system-status-text, body.state-processing_final #system-status-text {
+  color: var(--core-active);
+}
+
+body.state-speaking #ai-core-orb {
+  background-color: var(--core-active);
+}
+body.state-speaking #system-status-text {
+  color: var(--core-active);
+}
