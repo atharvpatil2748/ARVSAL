@@ -1,6 +1,0 @@
-sherpa-onnx
-sounddevice
-numpy
-jellyfish
-rapidfuzz
-webrtcvad-wheels
