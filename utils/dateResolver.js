@@ -110,6 +110,35 @@ function resolveDateRange(text = "") {
     }
   }
 
+  /* ===== X DAYS AGO ===== */
+  const agoMatch = text.match(/\b(\d+)\s+days?\s+ago\b/);
+  if (agoMatch) {
+    const n = parseInt(agoMatch[1], 10);
+    if (!isNaN(n) && n > 0) {
+      const targetDate = daysAgo(n);
+      return {
+        start: startOfDay(targetDate),
+        end: endOfDay(targetDate)
+      };
+    }
+  }
+
+  /* ===== DD/MM/YYYY ===== */
+  const slashMatch = text.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/);
+  if (slashMatch) {
+    const p1 = parseInt(slashMatch[1], 10);
+    const p2 = parseInt(slashMatch[2], 10);
+    const year = parseInt(slashMatch[3], 10);
+    // Assuming DD/MM/YYYY
+    const parsed = new Date(year, p2 - 1, p1);
+    if (!isNaN(parsed)) {
+      return {
+        start: startOfDay(parsed),
+        end: endOfDay(parsed)
+      };
+    }
+  }
+
   /* ===== SPECIFIC DATE ===== */
   const dateMatch = text.match(
     /\b(\d{1,2})(?:st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{1,2})\b/

@@ -16,7 +16,7 @@ const episodicMemory = require('@core/memory/episodicMemory');
 /* ================= CONFIG ================= */
 
 const MIN_EVENTS_FOR_REFLECTION = 5;
-const MIN_IMPORTANCE_AVG = 0.65;
+const MIN_IMPORTANCE_AVG = 0.5;
 const MIN_KEY_DOMINANCE = 3;
 
 
@@ -85,7 +85,7 @@ function shouldTriggerReflection(subject = "user") {
 
     return (
       count >= MIN_KEY_DOMINANCE &&   // frequency threshold (now 3)
-      avgKeyImportance >= 0.60        // raised quality threshold
+      avgKeyImportance >= 0.50        // raised quality threshold
     );
   });
 

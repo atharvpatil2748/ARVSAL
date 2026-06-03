@@ -139,10 +139,9 @@ async function summarizeEpisodes(entries) {
   }
 
   const summary = await llmRouter({
-  intent: "EPISODIC_SUMMARY",
-  text: content,
-  modelOverride: "qwen2:7b"
-});
+    intent: "EPISODIC_SUMMARY",
+    text: content
+  });
 
   return summary || "I don’t have anything meaningful stored for that period.";
 }
@@ -368,6 +367,10 @@ async function handleIntent(intentObj) {
       const range = resolveDateRange(intentObj.rawText);
 
       if (!range || !range.start || !range.end) {
+        if (intentObj.intent === "EPISODIC_RECALL") {
+          const entries = episodicMemory.getRecent(50);
+          return summarizeEpisodes(entries);
+        }
         return "I couldn't determine the time range you're asking about.";
       }
 
@@ -376,11 +379,6 @@ async function handleIntent(intentObj) {
         range.end.getTime()
       );
 
-      return summarizeEpisodes(entries);
-    }
-
-    case "EPISODIC_RECALL": {
-      const entries = episodicMemory.getRecent(50);
       return summarizeEpisodes(entries);
     }
 
