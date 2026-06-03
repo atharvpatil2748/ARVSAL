@@ -12,6 +12,7 @@ const { generatePlan } = require('@core/reasoning/plannerEngine');
 const { validateStep } = require('@agents/actionValidator');
 const { handleScreenAction } = require('@modules/vision/screenActionOrchestrator');
 const { evaluateActionFeedback } = require('@agents/actionFeedback');
+const memoryAgent = require('@agents/memoryAgent');
 
 const { executeSkill, isSkill } = require('@agents/skills/skillRegistry');
 
@@ -56,9 +57,12 @@ async function agentLoop(userInput){
 
   /* ========= WORLD ========= */
 
+  const memoryContext = await memoryAgent.getAgentContext(userInput);
+
   const worldContext = buildWorldContext({
     userInput,
-    screenType
+    screenType,
+    memoryContext
   });
 
   /* ========= PLAN ========= */

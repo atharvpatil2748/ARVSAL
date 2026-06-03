@@ -347,22 +347,16 @@ regression_test_report.json
 analysis.md.resolved
 
 
-# Local security/remediation audit reports
-docs/archive/DEPLOYMENT_READINESS_REPORT.md
-docs/archive/ENV_HISTORY_AUDIT.md
-docs/archive/FINAL_SECRET_SCAN_REPORT.md
-docs/archive/GITHUB_DEPLOYMENT_PLAN.md
-docs/archive/GITHUB_READY_REPORT.md
-docs/archive/GITIGNORE_HARDENING_REPORT.md
-docs/archive/HISTORY_PURGE_EXECUTION_REPORT.md
-docs/archive/HISTORY_PURGE_PLAN.md
-docs/archive/POST_PURGE_SECURITY_AUDIT.md
-docs/archive/PRE_PURGE_BACKUP_REPORT.md
-docs/archive/PRE_PURGE_VALIDATION_REPORT.md
-docs/archive/PUSH_PROTECTION_AUDIT.md
-docs/archive/SECURITY_REMEDIATION_CHECKLIST.md
-docs/archive/SECURITY_SECRET_AUDIT.md
-docs/archive/SUBMODULE_DEPLOYMENT_AUDIT.md
+# Temporary development/testing files
+scratch/
 
-# Local repository backup
-.git_backup/
+scratch/
+docs/archive/
+
+ARVSAL_*.md
+UCML_*.md
+PHASE_*.md
+arvsal_*.md
+
+.git_backup/*
+.git_backup

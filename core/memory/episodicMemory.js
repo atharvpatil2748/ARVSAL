@@ -106,8 +106,10 @@ async function store({
 
   const ts = Date.now();
   const { dayKey, weekKey, monthKey } = timeKeys(ts);
+  const id = `ep_${ts}_${Math.random().toString(36).substring(2, 6)}`;
 
   const episode = {
+    id,
     type,
     subject,
     key: key ? String(key).toLowerCase().trim() : null,
@@ -133,6 +135,20 @@ async function store({
     type !== "response" &&
     type !== "system"
   ) {
+    /* Phase 2: Cognitive State Graph Auto-Promotion */
+    if (subject && !['user', 'assistant', 'arvsal'].includes(subject.toLowerCase())) {
+      try {
+        const { upsertNode } = require('@core/cognitive/cognitiveStateGraph');
+        upsertNode({ 
+          type: 'topic', 
+          label: subject, 
+          summary: value.length > 50 ? value.substring(0, 50) + '...' : value 
+        });
+      } catch (e) {
+        console.error('[EpisodicMemory] CSG promotion failed:', e.message);
+      }
+    }
+
     embedText(value).then(embedding => {
       if (embedding) {
         addVector({
@@ -148,6 +164,15 @@ async function store({
 
   episodes.push(episode);
   save();
+
+  /* Phase 2: Topic Indexing */
+  if (subject) {
+    try {
+      const topicIndex = require('@core/memory/topicIndex');
+      topicIndex.addEpisode(subject, id);
+      topicIndex.save();
+    } catch (e) {}
+  }
 }
 
 /* ================= RETRIEVE ================= */

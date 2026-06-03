@@ -143,6 +143,15 @@ function remember({
     lastDecayAt: existing?.lastDecayAt || now
   };
 
+  /* Phase 2: Topic Indexing */
+  try {
+    const topicIndex = require('@core/memory/topicIndex');
+    const lookupKey = `${subject}::${key}`;
+    topicIndex.addSemanticKey(subject, lookupKey);
+    topicIndex.addSemanticKey(key, lookupKey);
+    topicIndex.save();
+  } catch (e) {}
+
 
   /* ===== VECTOR RAG INDEX (SEMANTIC FACT) ===== */
 

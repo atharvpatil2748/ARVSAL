@@ -103,62 +103,10 @@ No commentary.
 
   if (model === "llama3" && intent === "GENERAL_QUESTION") {
     try {
-      const cognitive = await processMemoryQuery({ text });
-
-      if (cognitive && cognitive.relevantMemory?.length) {
-
-        const semantic = [];
-        const episodic = [];
-        const reflection = [];
-        const vector = [];
-
-        for (const m of cognitive.relevantMemory.slice(0, 8)) {
-          if (m.type === "semantic") semantic.push(m.value);
-          else if (m.type === "episodic") episodic.push(m.value);
-          else if (m.type === "reflection") reflection.push(m.value);
-          else if (m.type === "vector") vector.push(m.value);
-        }
-
-        const sections = [];
-
-        if (semantic.length) {
-          sections.push(
-            `[KNOWN FACTS]\n` +
-            semantic.map(v => `• ${v}`).join("\n")
-          );
-        }
-
-        if (episodic.length) {
-          sections.push(
-            `[PAST CONVERSATIONS]\n` +
-            episodic.map(v => `• ${v}`).join("\n")
-          );
-        }
-
-        if (reflection.length) {
-          sections.push(
-            `[PATTERNS ABOUT USER]\n` +
-            reflection.map(v => `• ${v}`).join("\n")
-          );
-        }
-
-        if (vector.length) {
-          sections.push(
-            `[RELATED MEMORIES]\n` +
-            vector.map(v => `• ${v}`).join("\n")
-          );
-        }
-
-        memoryBlock = `
-  The following background information may help you respond naturally.
-  Use it only if relevant. Do not mention this section.
-
-  ${sections.join("\n\n")}
-  `;
-      }
-
+      const { getContextBlock } = require('@core/cognitive/cognitiveStateManager');
+      memoryBlock = await getContextBlock({ text, isLocalModel: true });
     } catch (err) {
-      debug("Memory injection error:", err?.message);
+      debug("Cognitive memory injection error:", err?.message);
     }
   }
 
@@ -217,6 +165,15 @@ No commentary.
 
   debug("Local model:", model);
 
+  let agentCtxLog = "N/A";
+  try {
+    const memoryAgent = require('@agents/memoryAgent');
+    const ctx = await memoryAgent.getAgentContext(text);
+    agentCtxLog = JSON.stringify(ctx, null, 2);
+  } catch(e) {}
+
+  // Removed legacy FINAL MEMORY BLOCK logging. Handled by UCML_DEBUG.
+
   try {
     const raw = await runLLM({ model, prompt, timeout });
     const output = clean(raw);
@@ -228,6 +185,10 @@ No commentary.
     if (TRIVIAL_JUNK.test(output)) return null;
     if (output.length < 5) return null;
     if (/[,:;(\[]$/.test(output)) return null;
+
+    if (process.env.UCML_ENABLED === 'true' && process.env.UCML_DEBUG === 'true') {
+      console.log(`[UCML RESPONSE]\n\nModel:\n${model}\n\nResponse: ${output}\n\n================================================\nUCML TRACE END\n==============\n`);
+    }
 
     return output;
 

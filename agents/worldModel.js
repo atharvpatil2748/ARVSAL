@@ -16,13 +16,14 @@ const interaction = require('@agents/interactionModeManager');
 function buildWorldContext({
   userInput,
   screenType,
-  memoryResult
+  memoryContext
 }) {
   const uiSnapshot = safeGetUISnapshot();
 
-  const relevantMemory = memoryResult?.relevantMemory || [];
-  const actionHints = memoryResult?.actionHints || [];
-  const missingInfo = memoryResult?.missingInfo || [];
+  const relevantMemory = memoryContext?.relevantMemory || [];
+  const workingNodes = memoryContext?.workingNodes || [];
+  const constraints = memoryContext?.constraints || [];
+  const activeProject = memoryContext?.activeProject || null;
 
   return {
     intent: userInput,
@@ -37,9 +38,10 @@ function buildWorldContext({
     ui: uiSnapshot,
 
     memory: {
-      relevantMemory,
-      actionHints,
-      missingInfo
+      workingNodes,
+      constraints,
+      activeProject,
+      relevantMemory
     },
 
     timestamp: Date.now()

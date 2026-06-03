@@ -17,12 +17,52 @@ const FILE = path.join(pathConfig.MEMORY_DIR, "vector_store.json");
 
 /* ================= CONFIG ================= */
 
-const MAX_VECTORS = 2000;
+const MAX_VECTORS = 5000;  // Phase 1: extended from 2000 — LanceDB migration in Phase 5
 const VECTOR_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 
 /* ================= STATE ================= */
 
 let store = [];
+
+/* ================= LANCEDB PARALLEL (Phase 5) ================= */
+
+const lancedb = require('vectordb');
+let _lanceTable = null;
+let _lanceInitPromise = null;
+
+async function getLanceTable() {
+  if (_lanceTable) return _lanceTable;
+  if (!_lanceInitPromise) {
+    _lanceInitPromise = (async () => {
+      try {
+        const dbPath = path.join(pathConfig.MEMORY_DIR, "lancedb");
+        const db = await lancedb.connect(dbPath);
+        
+        // Define schema or just use data inference
+        const tableNames = await db.tableNames();
+        if (tableNames.includes('vectors')) {
+          _lanceTable = await db.openTable('vectors');
+        } else {
+          // Fallback initial data so it infers schema
+          const initialData = [{ 
+            id: 'init_0', 
+            vector: Array(768).fill(0.0), // nomic-embed-text size
+            text: 'init', 
+            subject: 'system', 
+            importance: 0, 
+            timestamp: Date.now() 
+          }];
+          _lanceTable = await db.createTable('vectors', initialData);
+        }
+        console.log('[LanceDB] Parallel initialization successful.');
+      } catch (err) {
+        console.error('[LanceDB] Init failed:', err.message);
+      }
+      return _lanceTable;
+    })();
+  }
+  return _lanceInitPromise;
+}
 
 /* ================= INIT ================= */
 
@@ -100,6 +140,25 @@ function addVector(entry) {
   });
 
   cleanup();
+
+  /* Phase 5 LanceDB Parallel Write */
+  setImmediate(async () => {
+    try {
+      const table = await getLanceTable();
+      if (table) {
+        await table.add([{
+          id: store[store.length - 1].id,
+          vector: entry.embedding,
+          text: store[store.length - 1].text,
+          subject: store[store.length - 1].subject,
+          importance: store[store.length - 1].importance,
+          timestamp: store[store.length - 1].timestamp
+        }]);
+      }
+    } catch (e) {
+      console.error('[LanceDB] Parallel write failed:', e.message);
+    }
+  });
 }
 
 /* ================= SEARCH ================= */
@@ -130,6 +189,18 @@ function searchVectors(
   queryEmbedding,
   { subject = null, limit = 5, minScore = 0.35 } = {}
 ) {
+  /* Phase 5 LanceDB Parallel Read (Background validation) */
+  setImmediate(async () => {
+    try {
+      const table = await getLanceTable();
+      if (table) {
+        let q = table.search(queryEmbedding).metricType('cosine').limit(limit);
+        const results = await q.execute();
+        // Background validation success
+      }
+    } catch (e) {}
+  });
+
   if (!Array.isArray(queryEmbedding)) return [];
 
   const now = Date.now();

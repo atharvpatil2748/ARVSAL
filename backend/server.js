@@ -12,6 +12,26 @@ require("dotenv").config({
   path: path.resolve(__dirname, "../.env")
 });
 
+if (process.env.UCML_ENABLED === 'true') {
+  console.log('[UCML] ENABLED');
+  if (process.env.UCML_DEBUG === 'true') {
+    console.log('[UCML] DEBUG ENABLED');
+  }
+  
+  const RAMIndexer = require('@core/cognitive/ucml/RAMIndexer');
+  console.log('[UCML] Initializing RAM Indexer...');
+  RAMIndexer.initialize().then(() => {
+    console.log('[UCML] RAM Indexer Ready');
+    console.log(`[UCML] Entity Index: ${RAMIndexer.entityIndex.size}`);
+    console.log(`[UCML] Date Index: ${RAMIndexer.dateIndex.size}`);
+    console.log(`[UCML] Vector Index: ${RAMIndexer.vectorKeywordIndex.size}`);
+    console.log(`[UCML] Decision Index: ${RAMIndexer.decisionIndex.size}`);
+    console.log(`[UCML] CSG Index: ${RAMIndexer.csgKeywordIndex.size}`);
+  }).catch(err => {
+    console.error('[UCML] INDEX INITIALIZATION FAILED', err);
+  });
+}
+
 /* ================= OLLAMA WARMUP ================= */
 
 const { warmAll } = require('@providers/llm/ollamaWarmup');
@@ -60,7 +80,6 @@ const { handleIntent } = require('@actions/actions');
 const applyPersonality = require('@core/personality/personality');
 const llmRouter = require('@providers/llm/llmRouter');
 const { getWeather, getNews } = require('@actions/localSkills');
-const { processMemoryQuery } = require('@core/reasoning/cognitiveEngine');
 const { generatePlan } = require('@core/reasoning/plannerEngine');
 const { runLLM } = require('@providers/llm/llmRunner');
 const { isActionIntent } = require('@core/intent/actionIntentDetector');
@@ -101,6 +120,24 @@ const { suggestContent } = require('@actions/contentSuggester');
 /* ================= REFLECTION ================= */
 
 const { maybeRunReflection } = require('@modules/reflection/reflectionRunner');
+
+/* ================= COGNITIVE LAYER (PHASE 1) ================= */
+
+const cognitiveSnapshot = require('@core/cognitive/cognitiveSnapshot');
+const workingMemory     = require('@core/cognitive/workingMemory');
+// nodeTypeRegistry loaded implicitly by cognitiveSnapshot/workingMemory
+
+// Load snapshot and pre-populate Working Memory immediately at startup
+let _cognitiveSnapshot = cognitiveSnapshot.load();
+workingMemory.init({ snapshot: _cognitiveSnapshot });
+
+// Periodic snapshot save every 5 minutes
+setInterval(() => {
+  try {
+    cognitiveSnapshot.mergeWorkingMemory(_cognitiveSnapshot, workingMemory.getSnapshotData());
+    cognitiveSnapshot.save(_cognitiveSnapshot);
+  } catch { }
+}, 5 * 60 * 1000);
 
 /* ================= SYSTEM ACTIONS ================= */
 
@@ -1192,48 +1229,8 @@ app.post("/command", async (req, res) => {
     return res.json({ reply });
   }
 
-  /* ---------- COGNITIVE MEMORY LAYER (DEBUG MODE) ---------- */
-
-  if (
-    intentObj.intent === "GENERAL_QUESTION" &&
-    cleanRawText.length > 5
-  ) {
-    try {
-
-      console.log("\n================ COGNITIVE DEBUG START ================");
-      console.log("Query:", cleanRawText);
-
-      const cognitive = await processMemoryQuery({
-        text: cleanRawText
-      });
-
-      if (!cognitive || cognitive.recallStrength === 0) {
-
-        console.log("COGNITIVE: No relevant memory found.");
-        console.log("=======================================================\n");
-
-      } else {
-
-        console.log(
-          "Recall Strength:",
-          cognitive.recallStrength.toFixed(3)
-        );
-
-        console.log("\n--- Relevant Memory ---");
-
-        cognitive.relevantMemory.forEach((item, i) => {
-          console.log(
-            `[${i + 1}] (${item.type}) ${item.value} | score=${item.confidence.toFixed(3)}`
-          );
-        });
-
-        console.log("================= COGNITIVE DEBUG END =================\n");
-      }
-
-    } catch (err) {
-      console.error("COGNITIVE ERROR:", err);
-    }
-  }
+  /* ---------- COGNITIVE MEMORY LAYER DEPRECATED IN GENERAL PATH ---------- */
+  // The general chat hot-path memory is now exclusively handled by llmRouter.js via the CSM in <10ms.
 
   /* ---------- MAIN EXECUTION ---------- */
 
@@ -1763,20 +1760,53 @@ app.post("/command", async (req, res) => {
 
   // 🔥 NEVER await — Mistral runs in background, response is immediate
   setImmediate(() => maybeRunReflection("user").catch(() => { }));
+
+  /* ---------- COGNITIVE STATE UPDATE (PHASE 1) ---------- */
+
+  try {
+    // Extract simple topics from intent for snapshot tracking
+    const _turnTopics = [];
+    if (intentObj.key   && intentObj.key   !== 'general') _turnTopics.push(intentObj.key);
+    if (intentObj.subject && !['user','arvsal','assistant'].includes(intentObj.subject)) _turnTopics.push(intentObj.subject);
+
+    cognitiveSnapshot.updateFromTurn({
+      snapshot: _cognitiveSnapshot,
+      intent:   intentObj.intent,
+      topics:   _turnTopics
+    });
+  } catch { }
+
   res.json({ reply });
 });
 
 
 /* ================= START ================= */
 
-app.listen(3000, () => {
+const ramIndexer = require('@core/cognitive/ucml/RAMIndexer');
+
+app.listen(3000, async () => {
   console.log("Arvsal backend running on http://localhost:3000");
+  
+  // Phase-0: Initialize UCML RAM Indexer asynchronously so we don't block server boot
+  await ramIndexer.initialize().catch(err => {
+    console.error("[UCML] Boot-time indexer failed:", err.message);
+  });
 });
 
-process.on("exit", cleanupAll);
-process.on("SIGINT", cleanupAll);
-process.on("SIGTERM", cleanupAll);
-process.on("uncaughtException", cleanupAll);
+/* ================= COGNITIVE SHUTDOWN SAVE ================= */
+
+function _saveCognitiveState() {
+  try {
+    cognitiveSnapshot.mergeWorkingMemory(_cognitiveSnapshot, workingMemory.getSnapshotData());
+    cognitiveSnapshot.save(_cognitiveSnapshot);
+    console.log('[CognitiveSnapshot] Saved on shutdown.');
+  } catch { }
+}
+
+process.on("exit",            () => { _saveCognitiveState(); });
+process.on("SIGINT",          () => { _saveCognitiveState(); process.exit(0); });
+process.on("SIGTERM",         () => { _saveCognitiveState(); process.exit(0); });
+process.on("uncaughtException", (err) => { console.error('[UncaughtException]', err); _saveCognitiveState(); process.exit(1); });
 
 
 /* ================= WHATSAPP AUTOMATION ================= */
