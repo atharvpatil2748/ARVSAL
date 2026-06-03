@@ -1,0 +1,7 @@
+[submodule "agents/arvsal-vision"]
+	path = agents/arvsal-vision
+	url = https://github.com/microsoft/OmniParser.git
+
+[submodule "runtime/whisper"]
+	path = runtime/whisper
+	url = https://github.com/ggerganov/whisper.cpp

@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="UTF-8" />
+  <title>Arvsal</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles/theme.css">
+  <link rel="stylesheet" href="styles/layout.css">
+  <link rel="stylesheet" href="styles/components.css">
+  <link rel="stylesheet" href="styles/effects.css">
+  <link rel="stylesheet" href="styles/states.css">
+  <link rel="stylesheet" href="styles/animations.css">
+</head>
+
+<body class="state-idle">
+
+  <div id="os-container">
+    <div id="ambient-glow"></div>
+    
+    <div id="ai-core-container">
+      <div id="ai-core-orb"></div>
+    </div>
+
+    <!-- Mapped to #chat -->
+    <div id="chat"></div>
+
+    <div id="command-dock">
+      <div id="system-status-text">SYSTEM IDLE</div>
+      <div class="input-wrapper">
+        <!-- Mapped to #command -->
+        <input id="command" placeholder="Manual override..." autocomplete="off" />
+        <!-- Mapped to #sendBtn -->
+        <button id="sendBtn">Send</button>
+        <!-- Mapped to #micBtn -->
+        <button id="micBtn">🎤</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+
+    const chat = document.getElementById("chat");
+    const input = document.getElementById("command");
+    const sendBtn = document.getElementById("sendBtn");
+    const micBtn = document.getElementById("micBtn");
+
+    let mediaRecorder = null;
+    let audioChunks = [];
+    let micActive = false;
+    let ignoreInput = false;
+
+    let currentUserMessageId = null;
+    let messageCounter = 0;
+    let micSessionId = 0;
+    let currentProcessor = null;
+    let currentAudioContext = null;
+    let currentStream = null;
+
+    let systemState = "IDLE";
+    let streamBuffer = "";
+    let isStreaming = false;
+
+    // ── Stable-render state (prevents partial-token leakage) ──────────────────
+    let _renderedLength = 0;   // how many chars of stableText are in the DOM
+    let _lastStableText = "";  // last stable region committed to DOM
+    let _debounceTimer = null; // debounce handle for incremental updates
+
+    // ============================================================
+    // normalizeLLMOutput — Multi-stage transcript normalizer
+    // (frontend defence layer, mirrors backend llmRunner.js)
+    //
+    // Stage 1: Whitespace repair
+    // Stage 2: Prefix-growth stutter  ("becom become" → "become")
+    // Stage 3: Exact adjacent duplicate  ("to to" → "to")
+    // Stage 4: N-gram phrase overlap  ("the MCU the MCU" → "the MCU")
+    // Stage 5: Final whitespace normalization
+    // ============================================================
+    function normalizeLLMOutput(text) {
+      if (!text || typeof text !== "string") return text;
+
+      const PUNCT_STRIP = /^[.,;:!?()"'\-]+|[.,;:!?()"'\-]+$/g;
+      function sp(w) { return w.replace(PUNCT_STRIP, "").toLowerCase(); }
+
+      // Stage 1: Whitespace repair
+      let s = text
+        .replace(/\r\n/g, "\n")
+        .replace(/[^\S\n]+/g, " ")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+
+      let words = s.split(/\s+/).filter(Boolean);
+
+      // Stage 2: Prefix-growth stutter removal
+      ;(function prefixStutter() {
+        const out = [];
+        for (let i = 0; i < words.length; i++) {
+          const wc = sp(words[i]);
+          const nc = i + 1 < words.length ? sp(words[i + 1]) : null;
+          if (nc !== null && wc.length > 0 && nc.length > wc.length && nc.startsWith(wc)) {
+            console.log("[NORMALIZER][s2-stutter] drop:", JSON.stringify(words[i]), "→", JSON.stringify(words[i+1]));
+            continue;
+          }
+          out.push(words[i]);
+        }
+        words = out;
+      })();
+
+      // Stage 3: Exact adjacent duplicate collapse
+      ;(function exactDuplicates() {
+        const out = [];
+        for (let i = 0; i < words.length; i++) {
+          if (i > 0 && sp(words[i]) === sp(words[i - 1]) && sp(words[i]).length > 0) {
+            console.log("[NORMALIZER][s3-dup] drop:", JSON.stringify(words[i]));
+            continue;
+          }
+          out.push(words[i]);
+        }
+        words = out;
+      })();
+
+      // Stage 4: Phrase-tail N-gram overlap removal (N=3 down to 2)
+      ;(function phraseOverlap() {
+        let changed = true;
+        while (changed) {
+          changed = false;
+          for (let n = 3; n >= 2; n--) {
+            for (let i = 0; i <= words.length - n * 2; i++) {
+              const segA = words.slice(i,     i + n    ).map(sp).join(" ");
+              const segB = words.slice(i + n, i + n * 2).map(sp).join(" ");
+              if (segA === segB && segA.trim().length > 0) {
+                console.log("[NORMALIZER][s4-overlap] drop n-gram:", JSON.stringify(segA));
+                words.splice(i + n, n);
+                changed = true;
+                break;
+              }
+            }
+            if (changed) break;
+          }
+        }
+      })();
+
+      // Stage 5: Final whitespace normalization
+      return words.join(" ").replace(/[^\S\n]+/g, " ").trim();
+    }
+
+    // ── State Machine ──────────────────────────────────────────────────────
+    // Valid states: IDLE | WAKE_DETECTED | LISTENING | PROCESSING_FINAL | RESPONDING | RESTARTING
+    function setState(newState) {
+      console.log(`[STATE] ${systemState} → ${newState}`);
+      systemState = newState;
+      
+      // UI Auto-Sync based on source of truth
+      document.body.className = "state-" + newState.toLowerCase();
+      
+      const statusText = document.getElementById("system-status-text");
+      if (statusText) {
+        statusText.innerText = "SYSTEM " + newState.replace("_", " ");
+      }
+
+      if (systemState === "LISTENING" || systemState === "STREAMING") {
+        micBtn.classList.add("listening");
+      } else {
+        micBtn.classList.remove("listening");
+      }
+    }
+
+    function createMessage(sender, text) {
+      // ── Phase 4: Transient Display & Fade Persistence ──
+      const existing = chat.querySelectorAll("p");
+      existing.forEach((el, index) => {
+        const distance = existing.length - index;
+        if (distance === 1) el.className = "fade-1";
+        else if (distance === 2) el.className = "fade-2";
+        else el.className = "fade-out";
+      });
+
+      const p = document.createElement("p");
+      p.id = `msg_${messageCounter++}`;
+      p.className = "new-message";
+      p.innerHTML = `<b>${sender}:</b> <span>${text}</span>`;
+      chat.appendChild(p);
+      chat.scrollTop = chat.scrollHeight;
+      return p.id;
+    }
+
+    function updateMessage(id, text) {
+      const p = document.getElementById(id);
+      if (p) {
+        p.querySelector("span").innerText = text;
+        chat.scrollTop = chat.scrollHeight;
+      }
+    }
+
+    function addMessage(sender, text) {
+      createMessage(sender, text);
+    }
+
+    // ── Word-boundary-aware type animation ────────────────────────────────────
+    // Advances word-by-word (never character-by-character) so the DOM never
+    // shows partial tokens like "artifici", "char", "wh", etc.
+    function typeMessage(text, speed = 38) {
+      const id = createMessage("Arvsal", "");
+      
+      // Phase 4: Glow effect while typing
+      const el = document.getElementById(id);
+      if (el) el.classList.add("typing-active");
+
+      // Reset stabilization state for this new message
+      _renderedLength = 0;
+      _lastStableText = "";
+      clearTimeout(_debounceTimer);
+
+      // Pre-split the full text into whitespace-separated tokens
+      // Each token is either a word or punctuation run that follows a word.
+      // We reconstruct with the original whitespace so spacing is exact.
+      const tokens = [];
+      const re = /(\S+)(\s*)/g;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        tokens.push(m[1] + m[2]); // word + trailing whitespace
+      }
+
+      let tokenIdx = 0;
+      let rendered = "";
+
+      function typeNextWord() {
+        if (tokenIdx < tokens.length) {
+          rendered += tokens[tokenIdx++];
+          console.log("[RENDER][arvsal]", JSON.stringify(rendered)); // debug: verify no partials
+          updateMessage(id, rendered);
+
+          _lastStableText = rendered;
+          _renderedLength = rendered.length;
+
+          setTimeout(typeNextWord, speed);
+        } else {
+          // ── Final flush: ensure the EXACT original text is shown ───────────
+          // (guards against any off-by-one at the end)
+          updateMessage(id, text);
+          _lastStableText = text;
+          _renderedLength = text.length;
+
+          // Phase 4: Remove glow when done
+          const el = document.getElementById(id);
+          if (el) el.classList.remove("typing-active");
+        }
+      }
+
+      typeNextWord();
+    }
+
+    // ── Word-boundary-aware user-message animation ────────────────────────────
+    // Mirrors typeMessage: advances word-by-word so sub-word states like
+    // "usi", "him t" can never appear in the DOM.
+    function typeUserMessage(text, speed = 22) {
+      const id = createMessage("You", "");
+
+      // Pre-split into complete word+trailing-whitespace tokens
+      const tokens = [];
+      const re = /(\S+)(\s*)/g;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        tokens.push(m[1] + m[2]);
+      }
+
+      let tokenIdx = 0;
+      let rendered = "";
+
+      function typeNextWord() {
+        if (tokenIdx < tokens.length) {
+          rendered += tokens[tokenIdx++];
+          console.log("[RENDER][user]", JSON.stringify(rendered)); // debug: verify no partials
+          updateMessage(id, rendered);
+          setTimeout(typeNextWord, speed);
+        } else {
+          // Final flush — guarantee exact original text (handles trailing punctuation)
+          console.log("[RENDER][user][flush]", JSON.stringify(text));
+          updateMessage(id, text);
+        }
+      }
+
+      typeNextWord();
+      return id;
+    }
+
+    sendBtn.onclick = () => {
+      const text = input.value.trim();
+      input.value = "";
+      if (text) handleText(text);
+    };
+
+    async function handleText(text) {
+      setState("THINKING");
+
+      if (currentUserMessageId) {
+        currentUserMessageId = null; // don't overwrite typed text
+      } else {
+        addMessage("You", text);
+      }
+
+      const res = await window.arvsal.sendCommand(text);
+
+      if (!res?.reply) {
+        setState("IDLE");
+        window.arvsal.resumeWake();
+        return;
+      }
+
+      const rawReply = res.reply;
+      const stableReply = normalizeLLMOutput(rawReply);
+      console.log("[STABLE_RENDER] before:", JSON.stringify(rawReply));
+      console.log("[STABLE_RENDER] after: ", JSON.stringify(stableReply));
+
+      // ── Phase 4: Conversational Pacing ──
+      // Subtle delay before the response reveals itself, creating psychological anticipation
+      await new Promise(r => setTimeout(r, 450));
+
+      typeMessage(stableReply);
+
+      setState("SPEAKING");
+      await speakSmart(stableReply);
+
+      setState("RESTARTING");
+      startMic(true);
+    }
+
+    async function speak(text) {
+      const audioBuffer = await window.arvsal.speak(text);
+      const blob = new Blob([audioBuffer], { type: "audio/wav" });
+      const url = URL.createObjectURL(blob);
+
+      return new Promise(resolve => {
+        const audio = new Audio(url);
+        audio.onended = () => {
+          URL.revokeObjectURL(url);
+          resolve();
+        };
+        audio.play();
+      });
+    }
+
+    /* ================= SPEECH ENGINE ================= */
+
+    // Sanitize for Piper: strip markdown/code blocks that cannot be spoken
+    function sanitizeForTTS(text) {
+      return text
+        .replace(/```[\s\S]*?```/g, "")   // remove fenced code blocks
+        .replace(/`[^`]+`/g, "")          // remove inline code
+        .replace(/[*_~#]/g, "")           // remove markdown formatting chars
+        .replace(/\s{2,}/g, " ")          // collapse extra whitespace
+        .trim();
+    }
+
+    const sentenceQueue = [];
+    const audioQueue = [];
+
+    let isSpeaking = false;
+    let ttsRunning = false;
+
+    /* 🔥 TTS WORKER */
+    async function ttsWorker() {
+      if (ttsRunning) return;
+      ttsRunning = true;
+
+      while (sentenceQueue.length > 0) {
+        const sentence = sentenceQueue.shift();
+
+        const audioBuffer = await window.arvsal.speak(sentence);
+
+        audioQueue.push(audioBuffer);
+
+        // 🔥 TRIGGER PLAYER WHEN FIRST AUDIO ARRIVES
+        playQueue();
+      }
+
+      ttsRunning = false;
+    }
+
+    /* 🔥 AUDIO PLAYER */
+    async function playQueue() {
+      if (isSpeaking) return;
+
+      isSpeaking = true;
+
+      while (audioQueue.length > 0) {
+        const buffer = audioQueue.shift();
+        await playAudio(buffer);
+      }
+
+      isSpeaking = false;
+    }
+
+    /* 🔥 AUDIO HELPER */
+    function playAudio(buffer) {
+      return new Promise(resolve => {
+        const blob = new Blob([buffer], { type: "audio/wav" });
+        const url = URL.createObjectURL(blob);
+
+        const audio = new Audio(url);
+
+        audio.onended = () => {
+          URL.revokeObjectURL(url);
+          resolve();
+        };
+
+        audio.play();
+      });
+    }
+
+    /* 🔥 MAIN ORCHESTRATOR
+     * Sends ONE final sanitized string to Piper.
+     * Never sends partial tokens or comma-fragmented chunks.
+     */
+    async function speakSmart(text) {
+      // ── Step 8: TTS Synchronization ─────────────────────────────────────────
+      // Sanitize text first
+      const cleanText = sanitizeForTTS(text);
+      if (!cleanText) return;
+
+      // Split into complete sentences to restore incremental Piper queueing.
+      // This allows low-latency speech startup without sending partial fragments.
+      const sentences = cleanText.match(/[^.!?]+[.!?]+|\s*[^.!?]+$/g) || [cleanText];
+      
+      for (const s of sentences) {
+        const trimmed = s.trim();
+        if (trimmed) {
+          sentenceQueue.push(trimmed);
+        }
+      }
+      
+      ttsWorker();
+
+      // 🔥 WAIT until everything finishes
+      await waitForSpeechEnd();
+    }
+
+    function waitForSpeechEnd() {
+  return new Promise(resolve => {
+      const check = () => {
+        if (!ttsRunning && !isSpeaking && audioQueue.length === 0 && sentenceQueue.length === 0) {
+          resolve();
+        } else {
+          setTimeout(check, 100);
+        }
+      };
+        check();
+    });
+  }
+
+    function mergeText(base, incoming) {
+      if (!base) return incoming;
+      if (!incoming) return base;
+
+      const b = base.toLowerCase();
+      const i = incoming.toLowerCase();
+
+      if (i.includes(b)) return incoming;
+      if (b.includes(i)) return base;
+
+      const maxOverlap = Math.min(base.length, incoming.length);
+      for (let len = maxOverlap; len > 5; len--) {
+        if (b.endsWith(i.substring(0, len))) {
+          return base + incoming.substring(len);
+        }
+      }
+
+      return base + " " + incoming;
+    }
+
+    async function startMic(isFollowUp = false) {
+      // Accept IDLE, RESTARTING, and WAKE_DETECTED as valid entry states
+      const VALID_ENTRY = ["IDLE", "RESTARTING", "WAKE_DETECTED"];
+      if (!VALID_ENTRY.includes(systemState)) {
+        console.warn(`[STATE] startMic blocked — current state: ${systemState}`);
+        return;
+      }
+
+      // Tear down any previous mic session cleanly
+      if (currentProcessor) {
+        try { currentProcessor.disconnect(); currentProcessor.onaudioprocess = null; } catch { }
+        currentProcessor = null;
+      }
+      if (currentAudioContext) {
+        try { currentAudioContext.close(); } catch { }
+        currentAudioContext = null;
+      }
+      if (currentStream) {
+        try { currentStream.getTracks().forEach(t => t.stop()); } catch { }
+        currentStream = null;
+      }
+
+      micSessionId++;
+      const sessionId = micSessionId;
+      isStreaming = false;
+      streamBuffer = "";
+      currentUserMessageId = null;
+
+      // Pause wake detection BEFORE opening mic (prevents double-listen)
+      if (!isFollowUp) {
+        console.log("[STATE] Pausing wake detection for recording");
+        window.arvsal.stopWake();
+      }
+
+      // Activate mic internally (UI auto-syncs via setState)
+      micActive = true;
+      setState("LISTENING");
+      console.log("🎤 User recording started");
+
+      // Open mic — failure here resets state cleanly
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+        });
+      } catch (err) {
+        console.error("[STATE] getUserMedia failed:", err.message);
+        micActive = false;
+        setState("IDLE");
+        window.arvsal.resumeWake();
+        return;
+      }
+
+      const audioContext = new AudioContext({ sampleRate: 16000 });
+      const source = audioContext.createMediaStreamSource(stream);
+
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = 0.8;
+      source.connect(analyser);
+
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      currentProcessor = processor;
+      currentAudioContext = audioContext;
+      currentStream = stream;
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+
+      const pcmChunks = [];
+      const MAX_BUFFER = 64000;
+      let lastSendTime = 0;
+      const STREAM_INTERVAL = 1500;
+
+      processor.onaudioprocess = async (event) => {
+        if (systemState !== "LISTENING" && systemState !== "STREAMING") return;
+
+        console.log("🎤 streaming tick");
+        if (ignoreInput || !micActive) return;
+
+        const now = Date.now();
+        if (now - lastSendTime < STREAM_INTERVAL) return;
+        lastSendTime = now;
+
+        const float32 = event.inputBuffer.getChannelData(0);
+        let sum = 0;
+          for (let i = 0; i < float32.length; i++) {
+            sum += float32[i] * float32[i];
+          }
+        const rms = Math.sqrt(sum / float32.length);
+
+        // Push RMS to CSS for visualizer
+        const orb = document.getElementById('ai-core-orb');
+        if (orb) orb.style.setProperty('--mic-level', rms);
+
+        // 🔥 NOISE GATE (REAL FIX)
+        if (rms < 0.015) {
+          return; // 🚫 do not send to backend
+        }
+        const int16 = new Int16Array(float32.length);
+        for (let i = 0; i < float32.length; i++) {
+          int16[i] = Math.max(-1, Math.min(1, float32[i])) * 32767;
+        }
+
+        pcmChunks.push(int16);
+
+        let totalBytes = pcmChunks.reduce((acc, c) => acc + c.byteLength, 0);
+        while (pcmChunks.length > 0 && totalBytes > MAX_BUFFER) {
+          totalBytes -= pcmChunks[0].byteLength;
+          pcmChunks.shift();
+        }
+
+        const totalSamples = pcmChunks.reduce((acc, c) => acc + c.length, 0);
+        const merged = new Int16Array(totalSamples);
+        let offset = 0;
+        for (const chunk of pcmChunks) {
+          merged.set(chunk, offset);
+          offset += chunk.length;
+        }
+
+        // No streaming implemented entirely
+        // Just keeping the UI alive until silence/stop
+      };
+
+      mediaRecorder = new MediaRecorder(stream, {
+        mimeType: "audio/webm;codecs=opus"
+      });
+
+      const localAudioChunks = [];
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) localAudioChunks.push(e.data);
+      };
+
+      // Streaming logic completely removed for clean architecture
+
+      let hasSpoken = false;
+      let silenceTimer = null;
+      let noSpeechTimer = null;
+      let grace = true;
+      let speechStartTime = null;
+
+      setTimeout(() => grace = false, 800);
+
+      mediaRecorder.onstop = async () => {
+        isStreaming = false;
+        if (currentProcessor) currentProcessor.onaudioprocess = null;
+        micActive = false;
+        console.log("🛑 User recording ended");
+
+        if (systemState === "STREAMING" || systemState === "LISTENING") {
+          setState("PROCESSING_FINAL");
+        }
+
+        streamBuffer = "";
+        processor.disconnect();
+        source.disconnect();
+        audioContext.close();
+
+        stream.getTracks().forEach(t => t.stop());
+        clearTimeout(silenceTimer);
+        clearTimeout(noSpeechTimer);
+        if (typeof maxRecordingTimer !== "undefined") clearTimeout(maxRecordingTimer);
+
+        const recordingDuration = Date.now() - micStartTime;
+        if (!hasSpoken || recordingDuration < 1500) {
+          console.log(`🚫 Ignoring silent/short input (${recordingDuration}ms, spoken: ${hasSpoken})`);
+          streamBuffer = "";
+          pcmChunks.length = 0;
+          if (currentUserMessageId) {
+            const el = document.getElementById(currentUserMessageId);
+            if (el) el.remove();
+            currentUserMessageId = null;
+          }
+          setState("IDLE");
+          window.arvsal.resumeWake();
+          return;
+        }
+
+        if (localAudioChunks.length > 0) {
+          setState("PROCESSING_FINAL");
+          const blob = new Blob(localAudioChunks, { type: "audio/webm" });
+          const buffer = await blob.arrayBuffer();
+
+          let finalText = "";
+          try {
+            const largeRes = await window.arvsal.sendFinalAudio(buffer);
+            finalText = largeRes?.text?.trim() || "";
+            if (finalText) console.log("[Hybrid] large-v3 accepted:", finalText);
+          } catch (e) {
+            console.warn("[Hybrid] large-v3 failed:", e.message);
+          }
+
+          if (!finalText) {
+            try {
+              const smallRes = await window.arvsal.sendAudio(buffer);
+              finalText = smallRes?.text?.trim() || "";
+              if (finalText) console.log("[Hybrid] small model fallback:", finalText);
+            } catch (e) {
+              console.warn("[Hybrid] small model also failed:", e.message);
+            }
+          }
+
+          streamBuffer = "";
+          pcmChunks.length = 0;
+
+          if (finalText) {
+            // 🔥 Stutter-clean transcription before display and command dispatch
+            const stableFinalText = normalizeLLMOutput(finalText);
+            console.log("[STABLE_RENDER][transcription]", JSON.stringify(stableFinalText));
+
+            // 🔥 Show typing effect for user speech
+            currentUserMessageId = typeUserMessage(stableFinalText);
+
+            await handleText(finalText);
+
+            streamBuffer = "";
+            return;
+          } else {
+            if (currentUserMessageId) {
+              const el = document.getElementById(currentUserMessageId);
+              if (el) el.remove();
+              currentUserMessageId = null;
+            }
+          }
+        }
+
+        isStreaming = false;
+        streamBuffer = "";
+        currentUserMessageId = null;
+
+        if (systemState === "PROCESSING_FINAL" || systemState === "LISTENING" || systemState === "STREAMING") {
+          setState("IDLE");
+        }
+
+        window.arvsal.resumeWake();
+      };
+
+      mediaRecorder.start(300);
+      const micStartTime = Date.now();
+
+      const data = new Uint8Array(analyser.frequencyBinCount);
+
+      if (isFollowUp) {
+        noSpeechTimer = setTimeout(() => {
+          if (!hasSpoken && mediaRecorder.state === "recording") {
+            mediaRecorder.stop();
+          }
+        }, 5000);
+      }
+
+      // Absolute failsafe timeout so it never hangs in LISTENING forever
+      const maxRecordingTimer = setTimeout(() => {
+        console.log("🛑 Failsafe max recording time reached");
+        if (mediaRecorder.state === "recording") {
+          mediaRecorder.stop();
+        }
+      }, 15000);
+
+      const SILENCE_THRESHOLD = 0.01;
+      const SILENCE_DURATION = 1500;
+      const MIN_SPEECH_TIME = 400;
+
+      const detectSilence = () => {
+        analyser.getByteTimeDomainData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) {
+          const val = (data[i] - 128) / 128;
+          sum += val * val;
+        }
+        const rms = Math.sqrt(sum / data.length);
+
+        if (rms > 0.015) {
+          if (!hasSpoken) {
+            speechStartTime = Date.now();
+          }
+          hasSpoken = true;
+          clearTimeout(noSpeechTimer);
+        }
+
+        if (!grace && hasSpoken && rms < SILENCE_THRESHOLD) {
+          const speechDuration = Date.now() - (speechStartTime || Date.now());
+          if (speechDuration < MIN_SPEECH_TIME) {
+            clearTimeout(silenceTimer);
+            silenceTimer = null;
+          } else {
+            if (!silenceTimer) {
+              silenceTimer = setTimeout(() => {
+                if (mediaRecorder.state === "recording") {
+                  mediaRecorder.stop();
+                }
+              }, SILENCE_DURATION);
+            }
+          }
+        } else {
+          clearTimeout(silenceTimer);
+          silenceTimer = null;
+        }
+
+        if (mediaRecorder.state === "recording") {
+          requestAnimationFrame(detectSilence);
+        }
+      };
+
+      detectSilence();
+    }
+
+    micBtn.onclick = () => {
+      if (systemState === "IDLE") {
+        startMic(false);
+      } else if (systemState === "LISTENING") {
+        console.log("🛑 Manual stop via UI");
+        if (mediaRecorder && mediaRecorder.state === "recording") {
+          mediaRecorder.stop();
+        }
+      }
+    };
+
+    window.arvsal.onWake(async () => {
+      if (micActive) {
+        console.warn("[STATE] onWake ignored — mic already active");
+        return;
+      }
+      if (systemState !== "IDLE") {
+        console.warn(`[STATE] onWake ignored — state=${systemState}`);
+        return;
+      }
+
+      setState("WAKE_DETECTED");
+      console.log("🔥 Wake confirmed — playing acknowledgement");
+
+      // Play yes_sir.wav and AWAIT it before opening mic
+      // This prevents ignoreInput from racing with getUserMedia
+      await new Promise(resolve => {
+        const audio = new Audio("assets/yes_sir.wav")
+        audio.onended = resolve;
+        audio.onerror = resolve;   // don't hang if file missing
+        audio.play().catch(resolve);
+      });
+
+      console.log("🎤 User recording started");
+      startMic(false);
+    });
+
+    // ── Global hotkey: Ctrl+Shift+A ──────────────────────────────────────────
+    window.arvsal.onHotkey(() => {
+      if (micActive || systemState !== "IDLE") return;
+      startMic(false); // stopWake() called internally when isFollowUp=false
+    });
+
+  </script>
+</body>
+
+</html>

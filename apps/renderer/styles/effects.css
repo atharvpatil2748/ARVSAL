@@ -1,0 +1,67 @@
+/* Glassmorphism, Masks, Gradients, and Box Shadows */
+
+#ambient-glow {
+  background: radial-gradient(circle, rgba(56,189,248,0.1) 0%, rgba(5,9,20,0) 70%);
+  opacity: 0.5; /* Base opacity */
+}
+body.state-wake_detected #ambient-glow {
+  background: radial-gradient(circle, rgba(255,255,255,0.15) 0%, rgba(5,9,20,0) 70%);
+}
+body.state-listening #ambient-glow {
+  background: radial-gradient(circle, rgba(251,191,36,0.08) 0%, rgba(5,9,20,0) 70%);
+}
+
+#ai-core-orb {
+  /* Using fixed shadows to prevent animation lag */
+  box-shadow: 0 0 30px rgba(56,189,248,0.4), inset 0 0 20px rgba(255,255,255,0.5);
+}
+body.state-wake_detected #ai-core-orb {
+  box-shadow: 0 0 50px rgba(255,255,255,0.8);
+}
+
+#chat {
+  mask-image: linear-gradient(to bottom, transparent 0%, black 10%, black 90%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 10%, black 90%, transparent 100%);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  transform: translateZ(0);
+}
+
+#command-dock {
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+}
+
+/* Atmospheric Tension (Phase 5) */
+#os-container::after {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  pointer-events: none;
+  background: radial-gradient(circle, transparent 40%, rgba(0,0,0,0.4) 100%);
+  z-index: 999;
+  will-change: opacity;
+  transition: opacity 1.5s cubic-bezier(0.16, 1, 0.3, 1);
+  opacity: 0; /* hidden in idle by default */
+}
+
+body.state-idle #os-container::after {
+  opacity: 0.3;
+}
+
+body.state-wake_detected #os-container::after {
+  opacity: 0.1;
+  transition: opacity 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+body.state-listening #os-container::after {
+  opacity: 0.5;
+  background: radial-gradient(circle, transparent 30%, rgba(56,189,248,0.05) 100%);
+}
+
+body.state-thinking #os-container::after,
+body.state-processing_final #os-container::after {
+  opacity: 0.8;
+  background: radial-gradient(circle, transparent 30%, rgba(0,0,0,0.7) 100%);
+}
