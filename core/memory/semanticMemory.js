@@ -8,6 +8,8 @@
 const fs = require("fs");
 const path = require("path");
 const normalizeKeyExternal = require('@core/memory/keyNormalizer');
+const { atomicWriteJsonSync } = require('@utils/fileUtils');
+const eventStore = require('@core/persistence/eventStore');
 
 const pathConfig = require('@utils/pathConfig');
 const MEMORY_FILE = path.join(pathConfig.MEMORY_DIR, "memory.json");
@@ -20,7 +22,7 @@ let memory = { facts: {} };
 
 function save() {
   try {
-    fs.writeFileSync(MEMORY_FILE, JSON.stringify(memory, null, 2));
+    atomicWriteJsonSync(MEMORY_FILE, memory);
   } catch {
     // absolute fail-safe
   }
@@ -170,6 +172,7 @@ embedText(`${subject} ${key} is ${value}`).then(embedding => {
   }
 });
 
+  eventStore.appendEvent("FACT_STORED", "memory", { subject, key, value, confidence, source, category });
   save();
 }
 

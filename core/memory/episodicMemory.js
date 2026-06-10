@@ -16,6 +16,8 @@ const FILE = path.join(pathConfig.MEMORY_DIR, "episodic_memory.json");
 /* ================= IMPORTS ================= */
 
 const { scoreImportance } = require('@core/memory/importanceScorer');
+const { atomicWriteJsonSync } = require('@utils/fileUtils');
+const eventStore = require('@core/persistence/eventStore');
 
 /* ================= SESSION ================= */
 
@@ -33,7 +35,7 @@ let episodes = [];
 function load() {
   try {
     if (!fs.existsSync(FILE)) {
-      fs.writeFileSync(FILE, JSON.stringify([], null, 2));
+      atomicWriteJsonSync(FILE, []);
     }
     const raw = JSON.parse(fs.readFileSync(FILE, "utf8"));
     episodes = Array.isArray(raw) ? raw : [];
@@ -44,7 +46,7 @@ function load() {
 
 function save() {
   try {
-    fs.writeFileSync(FILE, JSON.stringify(episodes, null, 2));
+    atomicWriteJsonSync(FILE, episodes);
   } catch {
     // fail-safe
   }
@@ -163,6 +165,7 @@ async function store({
   }
 
   episodes.push(episode);
+  eventStore.appendEvent("EPISODE_STORED", "memory", { text: value, importance });
   save();
 
   /* Phase 2: Topic Indexing */

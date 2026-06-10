@@ -14,6 +14,8 @@ const path = require("path");
 
 const pathConfig = require('@utils/pathConfig');
 const FILE = path.join(pathConfig.MEMORY_DIR, "vector_store.json");
+const { atomicWriteJsonSync } = require('@utils/fileUtils');
+const eventStore = require('@core/persistence/eventStore');
 
 /* ================= CONFIG ================= */
 
@@ -69,7 +71,7 @@ async function getLanceTable() {
 (function init() {
   try {
     if (!fs.existsSync(FILE)) {
-      fs.writeFileSync(FILE, "[]", "utf8");
+      atomicWriteJsonSync(FILE, []);
     }
 
     const raw = fs.readFileSync(FILE, "utf8");
@@ -80,7 +82,7 @@ async function getLanceTable() {
     console.error("[VECTOR] INIT FAILED:", err);
     store = [];
     try {
-      fs.writeFileSync(FILE, "[]", "utf8");
+      atomicWriteJsonSync(FILE, []);
     } catch {}
   }
 })();
@@ -89,7 +91,7 @@ async function getLanceTable() {
 
 function save() {
   try {
-    fs.writeFileSync(FILE, JSON.stringify(store, null, 2), "utf8");
+    atomicWriteJsonSync(FILE, store);
   } catch (err) {
     console.error("[VECTOR] SAVE FAILED:", err);
   }
@@ -138,6 +140,9 @@ function addVector(entry) {
     timestamp: entry.timestamp || Date.now(),
     embedding: entry.embedding
   });
+
+  const newest = store[store.length - 1];
+  eventStore.appendEvent("VECTOR_UPSERTED", "memory", newest);
 
   cleanup();
 

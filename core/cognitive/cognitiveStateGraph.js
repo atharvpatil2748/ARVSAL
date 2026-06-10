@@ -20,8 +20,10 @@ const pathConfig = require('@utils/pathConfig');
 const { embedText } = require('@core/memory/embeddingModel');
 const nodeTypeRegistry = require('@core/cognitive/nodeTypeRegistry');
 const { generateSynonyms } = require('@core/cognitive/synonymExpander');
+const { atomicWriteJsonSync } = require('@utils/fileUtils');
 const { calculateScore } = require('@core/cognitive/promotionScorer');
 const eventBus = require('@core/cognitive/cognitiveEventBus');
+const eventStore = require('@core/persistence/eventStore');
 
 const CSG_FILE = path.join(pathConfig.MEMORY_DIR, 'cognitive_state_graph.json');
 
@@ -130,9 +132,7 @@ function save() {
       edges: _edges,
       lastUpdated: Date.now()
     };
-    const tmp = CSG_FILE + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(raw), 'utf8');
-    fs.renameSync(tmp, CSG_FILE);
+    atomicWriteJsonSync(CSG_FILE, raw);
   } catch (err) {
     console.error('[CSG] Save failed:', err.message);
   }
@@ -220,6 +220,7 @@ async function upsertNode({ type, label, summary = '', pinned = false, parentId 
 
   _rebuildIndexes();
   _scheduleSave();
+  eventStore.appendEvent("NODE_UPSERTED", "cognitive", { node });
   return node;
 }
 

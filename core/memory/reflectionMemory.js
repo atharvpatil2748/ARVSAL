@@ -15,6 +15,8 @@ const path = require("path");
 // const FILE = path.join(process.cwd(), "reflection_memory.json");
 const pathConfig = require('@utils/pathConfig');
 const FILE = path.join(pathConfig.MEMORY_DIR, "reflection_memory.json");
+const { atomicWriteJsonSync } = require('@utils/fileUtils');
+const eventStore = require('@core/persistence/eventStore');
 
 
 /* ================= CONFIG ================= */
@@ -31,7 +33,7 @@ let reflections = [];
 function load() {
   try {
     if (!fs.existsSync(FILE)) {
-      fs.writeFileSync(FILE, JSON.stringify([]));
+      atomicWriteJsonSync(FILE, []);
     }
     const raw = JSON.parse(fs.readFileSync(FILE, "utf8"));
     reflections = Array.isArray(raw) ? raw : [];
@@ -41,7 +43,7 @@ function load() {
 }
 
 function save() {
-  fs.writeFileSync(FILE, JSON.stringify(reflections, null, 2));
+  atomicWriteJsonSync(FILE, reflections);
 }
 
 load();
@@ -109,6 +111,7 @@ function addReflection({
       existing.confidence + (1 - existing.confidence) * 0.15
     );
     existing.lastUpdated = now();
+    eventStore.appendEvent("REFLECTION_REINFORCED", "memory", { subject, insight: normInsight, confidence: existing.confidence });
     save();
     return;
   }
@@ -158,6 +161,7 @@ function addReflection({
     reflections = reflections.slice(-MAX_REFLECTIONS);
   }
 
+  eventStore.appendEvent("REFLECTION_STORED", "memory", reflection);
   save();
 }
 
@@ -183,11 +187,13 @@ function getAll(minConfidence = 0.6) {
 function forgetSubject(subject) {
   subject = normalizeSubject(subject);
   reflections = reflections.filter(r => r.subject !== subject);
+  eventStore.appendEvent("REFLECTION_FORGOTTEN", "memory", { subject });
   save();
 }
 
 function forgetAll() {
   reflections = [];
+  eventStore.appendEvent("REFLECTION_CLEARED", "memory", {});
   save();
 }
 
