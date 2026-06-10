@@ -117,6 +117,24 @@ const { handleScreenAction } = require('@modules/vision/screenActionOrchestrator
 const { agentLoop } = require('@agents/agentLoop');
 const { suggestContent } = require('@actions/contentSuggester');
 
+/* ================= PHASE 0.5: UNIFIED AGENT LOOP ================= */
+// Feature-flag import. Does NOT affect legacy routing.
+const { runAgent } = require('@core/reasoning/unifiedAgentLoop');
+
+console.log(`
+=================================================
+
+[ROUTING MODE]
+
+DEFAULT:
+Unified Cognitive Core
+
+LEGACY PREFIX:
+"/legacy "
+
+=================================================
+`);
+
 /* ================= REFLECTION ================= */
 
 const { maybeRunReflection } = require('@modules/reflection/reflectionRunner');
@@ -1141,6 +1159,33 @@ app.post("/command", async (req, res) => {
 
   const emotional =
     /\b(wasted|tired|sad|happy|free|love|hate|stress|enjoy)\b/i.test(cleanRawText);
+
+  /* ─────────────────────────────────────────────────────────────
+   * PHASE 0.5C: ROUTING INVERSION (VALIDATION PERIOD)
+   *
+   * Default routing now targets the Unified Cognitive Core.
+   * Prefix any message with "/legacy " to route it through the
+   * legacy bifurcated path (plannerEngine / llmRouter).
+   *
+   * Rollback Procedure:
+   * 1. Change `if (cleanRawText.startsWith('/legacy '))` to `if (cleanRawText.startsWith('/u '))`
+   * 2. Swap the blocks so the `if` executes `runAgent` and `else` falls through.
+   * ───────────────────────────────────────────────────────────── */
+  if (cleanRawText.startsWith('/legacy ')) {
+    cleanRawText = cleanRawText.replace('/legacy ', '').trim();
+    cleanNormalizedText = cleanRawText.toLowerCase();
+    console.log('[Phase 0.5C] Routing to legacy bifurcated path:', cleanRawText);
+    // Let it fall through to legacy intent classification and routing below
+  } else {
+    console.log('[Phase 0.5C] Unified Agent Loop routing:', cleanRawText);
+    try {
+      const unifiedReply = await runAgent(cleanRawText, intentObj?.intent || 'GENERAL');
+      return res.json({ reply: unifiedReply });
+    } catch (err) {
+      console.error('[Phase 0.5C] Unified Agent Loop error:', err.message);
+      return res.json({ reply: 'Unified cognitive core encountered an error, sir. Falling back.' });
+    }
+  }
 
   /* ---------- INTENT (RULES FIRST) ---------- */
 
