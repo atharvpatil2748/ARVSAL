@@ -134,9 +134,10 @@ CRITICAL RULES:
  *
  * @param {string} userQuery - The raw user query
  * @param {string} [intentType] - Optional intent classification hint
+ * @param {object} [intentObj] - Full deterministic intent object
  * @returns {Promise<{systemPrompt: string, memoryBlock: string}>}
  */
-async function buildContext(userQuery, intentType = 'GENERAL') {
+async function buildContext(userQuery, intentType = 'GENERAL', intentObj = null) {
 
   // ── MEMORY RETRIEVAL (corrected path: UCML pipeline) ──────────────────────
   let memoryBlock = '';
@@ -209,6 +210,10 @@ ${contract}
 <WORLD_STATE_PROJECTION>
 ${worldState}
 </WORLD_STATE_PROJECTION>
+
+<INTENT_METADATA>
+${intentObj ? JSON.stringify(intentObj, null, 2) : '{"intent": "' + intentType + '"}'}
+</INTENT_METADATA>
 
 <AVAILABLE_TOOLS>
 ${toolSchemas}

@@ -1151,7 +1151,9 @@ app.post("/command", async (req, res) => {
     }
   }
 
-  let intentObj = null; // ✅ declare first (VERY IMPORTANT)
+  /* ---------- INTENT CLASSIFICATION (MOVED UP FOR PHASE 0.5E) ---------- */
+
+  let intentObj = null; 
 
   /* ---------- CHAT HISTORY (USER) ---------- */
 
@@ -1160,40 +1162,51 @@ app.post("/command", async (req, res) => {
   const emotional =
     /\b(wasted|tired|sad|happy|free|love|hate|stress|enjoy)\b/i.test(cleanRawText);
 
+  // ALWAYS classify intent BEFORE routing
+  intentObj = classifyIntent({
+    rawText: cleanRawText,
+    normalizedText: cleanNormalizedText
+  });
+
   /* ─────────────────────────────────────────────────────────────
-   * PHASE 0.5C: ROUTING INVERSION (VALIDATION PERIOD)
+   * PHASE 0.5E: DETERMINISTIC / UNIFIED HYBRID ROUTING
    *
-   * Default routing now targets the Unified Cognitive Core.
-   * Prefix any message with "/legacy " to route it through the
-   * legacy bifurcated path (plannerEngine / llmRouter).
+   * Intent classification happens first.
+   * If it's a reasoning-heavy intent (General, Memory, Coding, Math),
+   * we route it to the Unified Cognitive Core.
    *
-   * Rollback Procedure:
-   * 1. Change `if (cleanRawText.startsWith('/legacy '))` to `if (cleanRawText.startsWith('/u '))`
-   * 2. Swap the blocks so the `if` executes `runAgent` and `else` falls through.
+   * If it's a fast-path OS command (Mute, Open App) or /legacy prefix,
+   * we fall through to the native deterministic switch blocks below.
    * ───────────────────────────────────────────────────────────── */
+
+  const UNIFIED_CORE_INTENTS = [
+    "GENERAL_QUESTION", "SMALLTALK", "CODING_QUERY", "MATH_QUERY",
+    "MEMORY_SUMMARY", "EPISODIC_RECALL", "META_MEMORY"
+  ];
+
   if (cleanRawText.startsWith('/legacy ')) {
     cleanRawText = cleanRawText.replace('/legacy ', '').trim();
     cleanNormalizedText = cleanRawText.toLowerCase();
-    console.log('[Phase 0.5C] Routing to legacy bifurcated path:', cleanRawText);
-    // Let it fall through to legacy intent classification and routing below
-  } else {
-    console.log('[Phase 0.5C] Unified Agent Loop routing:', cleanRawText);
-    try {
-      const unifiedReply = await runAgent(cleanRawText, intentObj?.intent || 'GENERAL');
-      return res.json({ reply: unifiedReply });
-    } catch (err) {
-      console.error('[Phase 0.5C] Unified Agent Loop error:', err.message);
-      return res.json({ reply: 'Unified cognitive core encountered an error, sir. Falling back.' });
-    }
-  }
-
-  /* ---------- INTENT (RULES FIRST) ---------- */
-
-  if (!intentObj) {
+    // Re-classify without the prefix
     intentObj = classifyIntent({
       rawText: cleanRawText,
       normalizedText: cleanNormalizedText
     });
+    console.log('[Phase 0.5E] Routing to legacy bifurcated path:', cleanRawText);
+    // FALL THROUGH to switch block
+  } else if (UNIFIED_CORE_INTENTS.includes(intentObj.intent)) {
+    console.log(`[Phase 0.5E] Unified Agent Loop routing: [${intentObj.intent}]`, cleanRawText);
+    try {
+      // Pass full context to unifiedAgentLoop
+      const unifiedReply = await runAgent(cleanRawText, intentObj.intent, intentObj);
+      return res.json({ reply: unifiedReply });
+    } catch (err) {
+      console.error('[Phase 0.5E] Unified Agent Loop error:', err.message);
+      return res.json({ reply: 'Unified cognitive core encountered an error, sir. Falling back.' });
+    }
+  } else {
+    console.log(`[Phase 0.5E] Deterministic execution path: [${intentObj.intent}]`);
+    // FALL THROUGH to native handler switch block
   }
 
   /* ---------- CONFIRMATION (ABSOLUTE PRIORITY) ---------- */

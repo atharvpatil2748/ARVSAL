@@ -113,9 +113,10 @@ function assemblePrompt(systemPrompt, messages) {
  *
  * @param {string} userQuery - The raw user input (already stripped of /u prefix)
  * @param {string} [intentType] - Optional intent hint from intentClassifier
+ * @param {object} [intentObj] - Full deterministic intent object
  * @returns {Promise<string>} Final conversational response string
  */
-async function runAgent(userQuery, intentType = 'GENERAL') {
+async function runAgent(userQuery, intentType = 'GENERAL', intentObj = null) {
   if (!userQuery || typeof userQuery !== 'string') {
     return "I didn't catch that, sir.";
   }
@@ -125,7 +126,7 @@ async function runAgent(userQuery, intentType = 'GENERAL') {
   let memoryBlock;
   let memorySources;
   try {
-    ({ systemPrompt, memoryBlock, memorySources } = await buildContext(userQuery, intentType));
+    ({ systemPrompt, memoryBlock, memorySources } = await buildContext(userQuery, intentType, intentObj));
   } catch (err) {
     console.error('[UnifiedAgentLoop] Context build failed:', err.message);
     return "I'm having trouble organizing my thoughts right now, sir. Please try again.";
