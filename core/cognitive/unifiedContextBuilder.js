@@ -31,6 +31,7 @@
 
 const { getContextBlock } = require('@core/cognitive/cognitiveStateManager');
 const semanticMemory = require('@core/memory/semanticMemory');
+const chatHistory = require('@core/memory/chatHistory');
 
 /* ================= TOOL SCHEMA (Capability Abstraction Layer) ================= */
 
@@ -201,13 +202,21 @@ async function buildContext(userQuery, intentType = 'GENERAL', intentObj = null)
   const persona     = buildPersonaBlock();
   const contract    = buildContractInstructions();
 
+  const recentChat = chatHistory.getLLMContext(12);
+  let conversationHistoryStr = "";
+  if (recentChat.length > 0) {
+    conversationHistoryStr = "<CONVERSATION_HISTORY>\n" +
+      recentChat.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.text}`).join('\n\n') +
+      "\n</CONVERSATION_HISTORY>\n";
+  }
+
   const systemPrompt = `<SYSTEM_PERSONA>
 ${persona}
 
 ${contract}
 </SYSTEM_PERSONA>
 
-<WORLD_STATE_PROJECTION>
+${conversationHistoryStr}<WORLD_STATE_PROJECTION>
 ${worldState}
 </WORLD_STATE_PROJECTION>
 

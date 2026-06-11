@@ -1184,6 +1184,11 @@ app.post("/command", async (req, res) => {
     "MEMORY_SUMMARY", "EPISODIC_RECALL", "META_MEMORY"
   ];
 
+  let reply = "";
+  let skipEpisodic = false;
+  let skipPersonality = false;
+  let handledByUnifiedCore = false;
+
   if (cleanRawText.startsWith('/legacy ')) {
     cleanRawText = cleanRawText.replace('/legacy ', '').trim();
     cleanNormalizedText = cleanRawText.toLowerCase();
@@ -1198,11 +1203,12 @@ app.post("/command", async (req, res) => {
     console.log(`[Phase 0.5E] Unified Agent Loop routing: [${intentObj.intent}]`, cleanRawText);
     try {
       // Pass full context to unifiedAgentLoop
-      const unifiedReply = await runAgent(cleanRawText, intentObj.intent, intentObj);
-      return res.json({ reply: unifiedReply });
+      reply = await runAgent(cleanRawText, intentObj.intent, intentObj);
+      handledByUnifiedCore = true;
     } catch (err) {
       console.error('[Phase 0.5E] Unified Agent Loop error:', err.message);
-      return res.json({ reply: 'Unified cognitive core encountered an error, sir. Falling back.' });
+      reply = 'Unified cognitive core encountered an error, sir. Falling back.';
+      handledByUnifiedCore = true;
     }
   } else {
     console.log(`[Phase 0.5E] Deterministic execution path: [${intentObj.intent}]`);
@@ -1292,12 +1298,9 @@ app.post("/command", async (req, res) => {
 
   /* ---------- MAIN EXECUTION ---------- */
 
-  let reply = "";
-  let skipEpisodic = false;
-  let skipPersonality = false;
-
   try {
-    switch (intentObj.intent) {
+    if (!handledByUnifiedCore) {
+      switch (intentObj.intent) {
 
       /* ===== AI MODE ===== */
 
@@ -1763,8 +1766,8 @@ app.post("/command", async (req, res) => {
 
         break;
 
-      default:
         reply = "I'm not certain about that.";
+    }
     }
 
   } catch (err) {
@@ -1776,9 +1779,11 @@ app.post("/command", async (req, res) => {
 
   const conversational =
     intentObj.intent === "GENERAL_QUESTION" ||
-    intentObj.intent === "SMALLTALK";
+    intentObj.intent === "SMALLTALK" ||
+    intentObj.intent === "CODING_QUERY" ||
+    intentObj.intent === "MATH_QUERY";
 
-  if (conversational) {
+  if (conversational && !skipEpisodic) {
     const themedKey = extractKey(cleanRawText);
     await episodicMemory.store({
       type: "conversation",
@@ -1790,9 +1795,10 @@ app.post("/command", async (req, res) => {
       importance: emotional ? 0.75 : 0.6
     });
   }
+
   /* ---------- PERSONALITY ---------- */
 
-  if (!skipPersonality) {
+  if (!skipPersonality && !handledByUnifiedCore) {
     reply = await applyPersonality(reply);
   }
 
@@ -1802,9 +1808,10 @@ app.post("/command", async (req, res) => {
   if (["CONFIRM_YES", "CONFIRM_NO"].includes(intentObj.intent)) {
     skipEpisodic = true;
   }
+
   /* ---------- EPISODIC STORE (ASSISTANT) ---------- */
 
-  if (conversational) {
+  if (conversational && !skipEpisodic) {
     await episodicMemory.store({
       type: "response",
       subject: "arvsal",
