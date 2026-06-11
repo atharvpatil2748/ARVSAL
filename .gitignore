@@ -228,6 +228,8 @@ data/memory/*
 !data/memory/.gitkeep
 data/security/
 data/sessions/
+data/worldstate/
+data/events/
 
 # Runtime audio temporaries
 book/audio_tmp/
